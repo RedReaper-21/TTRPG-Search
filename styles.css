@@ -1,0 +1,431 @@
+:root {
+    --ttrpg-search-row-height: 108px;
+}
+
+.ttrpg-vault-search-modal {
+    width: min(980px, 94vw);
+}
+
+.ttrpg-vault-search {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ttrpg-vault-search__toolbar {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.ttrpg-vault-search__input {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--background-primary);
+}
+
+.ttrpg-vault-search__filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.ttrpg-vault-search__filter {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ttrpg-vault-search__filter-label {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.ttrpg-vault-search__select {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--background-primary);
+}
+
+.ttrpg-vault-search__stats {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.ttrpg-vault-search__results-viewport {
+    position: relative;
+    min-height: 320px;
+    max-height: 64vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 2px;
+}
+
+.ttrpg-vault-search__results-canvas {
+    position: relative;
+    width: 100%;
+}
+
+.ttrpg-vault-search__result {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: calc(var(--ttrpg-search-row-height) - 8px);
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--background-primary);
+    cursor: pointer;
+    transition:
+        background-color 120ms ease,
+        border-color 120ms ease;
+}
+
+.ttrpg-vault-search__result:hover,
+.ttrpg-vault-search__result.is-selected {
+    background: var(--background-modifier-hover);
+    border-color: var(--interactive-accent);
+}
+
+.ttrpg-vault-search__result--collection {
+    background: color-mix(in srgb, var(--interactive-accent) 6%, var(--background-primary));
+}
+
+.ttrpg-vault-search__result-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.ttrpg-vault-search__primary {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ttrpg-vault-search__name {
+    font-weight: 700;
+    font-size: 15px;
+    line-height: 1.35;
+    word-break: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.ttrpg-vault-search__source-file {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-muted);
+    min-width: 0;
+}
+
+.ttrpg-vault-search__source-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-normal);
+    background: color-mix(in srgb, var(--interactive-accent) 12%, var(--background-secondary));
+    border: 1px solid var(--background-modifier-border);
+    white-space: nowrap;
+}
+
+.ttrpg-vault-search__source-separator {
+    color: var(--text-faint);
+    font-weight: 600;
+}
+
+.ttrpg-vault-search__file-label {
+    color: var(--text-normal);
+    font-weight: 500;
+    min-width: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.ttrpg-vault-search__aliases {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.ttrpg-vault-search__collection-line {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-muted);
+}
+
+.ttrpg-vault-search__reader-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-normal);
+    background: color-mix(in srgb, var(--color-purple) 18%, var(--background-secondary));
+    border: 1px solid var(--background-modifier-border);
+    white-space: nowrap;
+}
+
+.ttrpg-vault-search__collection-meta {
+    display: inline-flex;
+    align-items: center;
+}
+
+.ttrpg-vault-search__badges {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.ttrpg-vault-search__badge {
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-normal);
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    white-space: nowrap;
+}
+
+.ttrpg-vault-search__path {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    word-break: break-all;
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.ttrpg-vault-search__empty {
+    padding: 20px 12px;
+    text-align: center;
+    color: var(--text-muted);
+    border: 1px dashed var(--background-modifier-border);
+    border-radius: 12px;
+    background: var(--background-primary);
+}
+
+/* Reader */
+
+.ttrpg-reader-modal {
+    width: min(1280px, 96vw);
+    height: min(88vh, 920px);
+}
+
+.ttrpg-reader {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    height: 100%;
+    min-height: 0;
+}
+
+.ttrpg-reader__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.ttrpg-reader__heading {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.ttrpg-reader__subtitle {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.ttrpg-reader__nav {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.ttrpg-reader__nav-button {
+    padding: 7px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--background-secondary);
+    cursor: pointer;
+}
+
+.ttrpg-reader__nav-button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.ttrpg-reader__body {
+    display: grid;
+    grid-template-columns: 280px minmax(0, 1fr);
+    gap: 12px;
+    flex: 1;
+    min-height: 0;
+}
+
+.ttrpg-reader__sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 14px;
+    background: var(--background-primary);
+    overflow: hidden;
+}
+
+.ttrpg-reader__sidebar-title {
+    padding: 12px 14px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--background-modifier-border);
+    background: var(--background-secondary);
+}
+
+.ttrpg-reader__sections {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    min-height: 0;
+    padding: 6px;
+}
+
+.ttrpg-reader__section {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    width: 100%;
+    text-align: left;
+    padding: 10px 12px;
+    padding-left: calc(12px + (var(--ttrpg-reader-depth, 0) * 14px));
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    cursor: pointer;
+}
+
+.ttrpg-reader__section:hover,
+.ttrpg-reader__section.is-active {
+    background: var(--background-modifier-hover);
+}
+
+.ttrpg-reader__section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.ttrpg-reader__section-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.ttrpg-reader__content-wrap {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 14px;
+    background: var(--background-primary);
+    overflow: hidden;
+}
+
+.ttrpg-reader__content-header {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    background: var(--background-secondary);
+}
+
+.ttrpg-reader__content-title {
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.3;
+}
+
+.ttrpg-reader__content-meta {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    word-break: break-all;
+}
+
+.ttrpg-reader__content {
+    min-height: 0;
+    overflow-y: auto;
+    padding: 18px 20px 28px;
+    line-height: 1.6;
+}
+
+.ttrpg-reader__content .markdown-preview-view,
+.ttrpg-reader__content .markdown-rendered {
+    padding: 0;
+}
+
+@media (max-width: 900px) {
+    .ttrpg-reader__body {
+        grid-template-columns: 1fr;
+    }
+
+    .ttrpg-reader__sidebar {
+        max-height: 240px;
+    }
+}
+
+@media (max-width: 700px) {
+    .ttrpg-vault-search__filters {
+        grid-template-columns: 1fr;
+    }
+
+    .ttrpg-vault-search__result-top {
+        flex-direction: column;
+    }
+
+    .ttrpg-vault-search__badges {
+        justify-content: flex-start;
+    }
+
+    .ttrpg-reader__header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .ttrpg-reader__nav {
+        width: 100%;
+    }
+}
