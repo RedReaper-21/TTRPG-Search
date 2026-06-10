@@ -1,7 +1,7 @@
 {
   "id": "ttrpg-vault-search",
   "name": "TTRPG Vault Search",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "minAppVersion": "1.5.0",
   "description": "Fast modal search for TTRPG CLI / 5etools markdown output with type and source filters.",
   "author": "RedReaper21",
