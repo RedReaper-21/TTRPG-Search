@@ -26,6 +26,7 @@ const DEFAULT_SETTINGS = {
     bookmarkTags: {},      // {path: groupId | null}
     bookmarkGroupOrder: {},// {[groupId]: string[]} – custom path order per named group
     sourceAliasesText: "",
+    sourceOverridesText: "",
     sourceChipData: {},
     sourceFilterPresets: [],
     typeFolderMappingsText: "",
@@ -33,6 +34,11 @@ const DEFAULT_SETTINGS = {
     lastSearchState: null,
     spellbookBookmarks: [], // isolated bookmark list for the Spellbook modal
     spellTagPrefix: "ttrpg-cli", // prefix for tag-based spell metadata: e.g. ttrpg-cli/spell/school/Evocation
+    settingsBackupEnabled: true,
+    settingsBackupIntervalHours: 24,
+    settingsBackupFolder: "TTRPG Search Backups",
+    settingsBackupMaxFiles: 30,
+    settingsBackupLastRun: 0,
 };
 
 const COLLATOR = new Intl.Collator(undefined, {
@@ -237,6 +243,7 @@ const GENERIC_PATH_SEGMENTS = new Set([
 
 let ACTIVE_SOURCE_LABELS = new Map();
 let ACTIVE_FOLDER_TYPE_MAP = new Map();
+let ACTIVE_SOURCE_OVERRIDE_RULES = [];
 let ACTIVE_BASENAME_SOURCE_KEYS = new Set();
 
 function normalizeConfiguredFolder(value) {
@@ -1031,6 +1038,55 @@ function parseSourceAliasesText(text) {
     return map;
 }
 
+
+function wildcardPatternToRegExp(pattern) {
+    const escaped = String(pattern || "")
+        .replace(/[|\\{}()[\]^$+*?.]/g, "\\$&")
+        .replace(/\\\*/g, ".*")
+        .replace(/\\\?/g, ".");
+    return new RegExp("^" + escaped + "$", "i");
+}
+function parseSourceOverrideRulesText(text) {
+    return String(text || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#"))
+        .map((line) => {
+            const parts = line.includes("=>") ? line.split("=>") : line.split("=");
+            if (parts.length < 2) return null;
+            const matcher = String(parts.shift() || "").trim();
+            const source = String(parts.join("=>") || "").trim();
+            if (!matcher || !source) return null;
+            let kind = "path";
+            let value = matcher;
+            const mode = matcher.match(/^(path|glob|type|source|name)\s*:\s*(.+)$/i);
+            if (mode) { kind = mode[1].toLowerCase(); value = mode[2].trim(); }
+            return { kind, value, source, valueKey: normalizeKey(value), valuePath: normalizePath(value).toLowerCase(), regex: kind === "glob" ? wildcardPatternToRegExp(normalizePath(value)) : null };
+        })
+        .filter(Boolean);
+}
+function findForcedSourceOverride(path, typeLabel, inferredSourceLabel, displayName) {
+    if (!ACTIVE_SOURCE_OVERRIDE_RULES || !ACTIVE_SOURCE_OVERRIDE_RULES.length) return "";
+    const cleanPath = normalizePath(path || "");
+    const lowerPath = cleanPath.toLowerCase();
+    const pathKey = normalizeKey(cleanPath);
+    const typeKey = normalizeKey(typeLabel || "");
+    const sourceKey = normalizeKey(inferredSourceLabel || "");
+    const nameKey = normalizeKey(displayName || "");
+    for (const rule of ACTIVE_SOURCE_OVERRIDE_RULES) {
+        if (!rule) continue;
+        if (rule.kind === "type" && typeKey === rule.valueKey) return rule.source;
+        if (rule.kind === "source" && sourceKey === rule.valueKey) return rule.source;
+        if (rule.kind === "name" && nameKey && (nameKey === rule.valueKey || nameKey.includes(rule.valueKey))) return rule.source;
+        if (rule.kind === "glob" && rule.regex && rule.regex.test(cleanPath)) return rule.source;
+        if (rule.kind === "path") {
+            const valuePath = rule.valuePath;
+            if (lowerPath === valuePath || lowerPath.startsWith(valuePath.replace(/\/+$/, "") + "/") || lowerPath.includes(valuePath)) return rule.source;
+            if (rule.valueKey && pathKey.includes(rule.valueKey)) return rule.source;
+        }
+    }
+    return "";
+}
 function parseTypeFolderMappingsText(text) {
     const map = new Map();
 
@@ -2307,6 +2363,7 @@ class TTRPGVaultSearchPlugin extends Plugin {
         this.refreshConfiguredFolders();
         this.refreshCustomMaps();
         this.injectStyles();
+        this.startSettingsBackupScheduler();
 
         this.registerView(TTRPG_READER_VIEW_TYPE, (leaf) => new TTRPGReaderView(leaf, this));
 
@@ -2399,6 +2456,7 @@ class TTRPGVaultSearchPlugin extends Plugin {
     refreshCustomMaps() {
         ACTIVE_SOURCE_LABELS = parseSourceAliasesText(this.settings.sourceAliasesText || "");
         ACTIVE_FOLDER_TYPE_MAP = parseTypeFolderMappingsText(this.settings.typeFolderMappingsText || "");
+        ACTIVE_SOURCE_OVERRIDE_RULES = parseSourceOverrideRulesText(this.settings.sourceOverridesText || "");
     }
 
     openSearchModal(initialState = null) {
@@ -2690,6 +2748,70 @@ class TTRPGVaultSearchPlugin extends Plugin {
     }
 
     // Save a custom display order for bookmarks inside a named group
+    getBookmarkSortPathForEntry(entry, bookmarkedPaths = null) {
+        const bookmarked = bookmarkedPaths || new Set(this.getBookmarkedPaths());
+        if (entry && entry.collectionKind && entry.collectionPath && bookmarked.has(entry.collectionPath) && !bookmarked.has(entry.path)) {
+            return entry.collectionPath;
+        }
+        return entry && entry.path ? entry.path : "";
+    }
+
+    getBookmarkOrderKey(groupId) {
+        return groupId === "ungrouped" ? "__ungrouped" : groupId;
+    }
+
+    getBookmarkOrderedPathsForGroup(groupId) {
+        const bookmarks = this.getBookmarkedPaths();
+        const bookmarkSet = new Set(bookmarks);
+        const orderKey = this.getBookmarkOrderKey(groupId);
+        const savedOrder = this.getBookmarkGroupOrder(orderKey) || [];
+        const inGroup = bookmarks.filter((bookmarkPath) => {
+            const assigned = this.getBookmarkGroupForPath(bookmarkPath);
+            if (groupId === "ungrouped") return !assigned;
+            return assigned === groupId;
+        });
+        const inGroupSet = new Set(inGroup);
+        const ordered = [];
+        for (const bookmarkPath of savedOrder) {
+            if (bookmarkSet.has(bookmarkPath) && inGroupSet.has(bookmarkPath) && !ordered.includes(bookmarkPath)) ordered.push(bookmarkPath);
+        }
+        const missing = inGroup.filter((bookmarkPath) => !ordered.includes(bookmarkPath)).sort((a, b) => COLLATOR.compare(a, b));
+        return ordered.concat(missing);
+    }
+
+    getBookmarkOrderedPathsForViewer(groupId = null) {
+        if (groupId !== null) return this.getBookmarkOrderedPathsForGroup(groupId);
+        const groups = this.getBookmarkGroups();
+        const ordered = [];
+        const add = (paths) => {
+            for (const p of paths) if (!ordered.includes(p)) ordered.push(p);
+        };
+        add(this.getBookmarkOrderedPathsForGroup("ungrouped"));
+        for (const group of groups) add(this.getBookmarkOrderedPathsForGroup(group.id));
+        const all = this.getBookmarkedPaths();
+        const missing = all.filter((p) => !ordered.includes(p)).sort((a, b) => COLLATOR.compare(a, b));
+        return ordered.concat(missing);
+    }
+
+    sortEntriesByBookmarkOrder(entries, groupId = null) {
+        const orderedPaths = this.getBookmarkOrderedPathsForViewer(groupId);
+        if (!orderedPaths.length) return entries;
+        const bookmarked = new Set(this.getBookmarkedPaths());
+        const orderMap = new Map();
+        orderedPaths.forEach((bookmarkPath, index) => orderMap.set(bookmarkPath, index));
+        return [...entries].sort((a, b) => {
+            const aPath = this.getBookmarkSortPathForEntry(a, bookmarked);
+            const bPath = this.getBookmarkSortPathForEntry(b, bookmarked);
+            const aIndex = orderMap.has(aPath) ? orderMap.get(aPath) : Number.MAX_SAFE_INTEGER;
+            const bIndex = orderMap.has(bPath) ? orderMap.get(bPath) : Number.MAX_SAFE_INTEGER;
+            if (aIndex !== bIndex) return aIndex - bIndex;
+            const aLabel = (a && (a.collectionName || a.displayName || a.fileLabel || a.path)) || "";
+            const bLabel = (b && (b.collectionName || b.displayName || b.fileLabel || b.path)) || "";
+            return COLLATOR.compare(aLabel, bLabel);
+        });
+    }
+
+
     getBookmarkGroupOrder(groupId) {
         const order = this.settings.bookmarkGroupOrder || {};
         return Array.isArray(order[groupId]) ? [...order[groupId]] : null;
@@ -2735,6 +2857,156 @@ class TTRPGVaultSearchPlugin extends Plugin {
             }
         }
     }
+    getSettingsBackupFolder() {
+        const folder = String(this.settings.settingsBackupFolder || "TTRPG Search Backups").trim() || "TTRPG Search Backups";
+        return normalizePath(folder).replace(/^\/+|\/+$/g, "");
+    }
+
+    getSettingsBackupIntervalMs() {
+        const hours = Number(this.settings.settingsBackupIntervalHours || 24);
+        if (!Number.isFinite(hours) || hours <= 0) return 0;
+        return Math.max(0.1, hours) * 60 * 60 * 1000;
+    }
+
+    async ensureSettingsBackupFolder() {
+        const folder = this.getSettingsBackupFolder();
+        if (!folder) return "";
+        try {
+            const exists = await this.app.vault.adapter.exists(folder);
+            if (!exists && this.app.vault.adapter.mkdir) await this.app.vault.adapter.mkdir(folder);
+            return folder;
+        } catch (error) {
+            console.error("TTRPG Search settings backup folder error:", error);
+            return "";
+        }
+    }
+
+    buildSettingsBackupPayload(reason = "scheduled") {
+        const settingsCopy = JSON.parse(JSON.stringify(this.settings || {}));
+        return {
+            format: "ttrpg-vault-search-settings-backup-v1",
+            reason,
+            createdAt: new Date().toISOString(),
+            pluginId: this.manifest && this.manifest.id ? this.manifest.id : "ttrpg-search",
+            pluginVersion: this.manifest && this.manifest.version ? this.manifest.version : "",
+            indexedEntryCount: Array.isArray(this.index) ? this.index.length : 0,
+            settings: settingsCopy,
+        };
+    }
+
+    async pruneSettingsBackups(folder) {
+        const maxFiles = Math.max(0, Number(this.settings.settingsBackupMaxFiles || 30));
+        if (!maxFiles || !folder || !this.app.vault.adapter.list) return;
+        try {
+            const listed = await this.app.vault.adapter.list(folder);
+            const files = (listed && Array.isArray(listed.files) ? listed.files : [])
+                .filter((file) => /ttrpg-search-settings-.*\.json$/i.test(file))
+                .sort();
+            const excess = files.length - maxFiles;
+            if (excess <= 0) return;
+            for (const file of files.slice(0, excess)) {
+                try { await this.app.vault.adapter.remove(file); }
+                catch (error) { console.warn("TTRPG Search could not remove old settings backup:", file, error); }
+            }
+        } catch (error) {
+            console.warn("TTRPG Search settings backup prune failed:", error);
+        }
+    }
+
+    async runSettingsBackup(reason = "scheduled", force = false) {
+        if (!force && !this.settings.settingsBackupEnabled) return false;
+        const intervalMs = this.getSettingsBackupIntervalMs();
+        if (!force && !intervalMs) return false;
+        const now = Date.now();
+        const last = Number(this.settings.settingsBackupLastRun || 0);
+        if (!force && last && now - last < intervalMs) return false;
+
+        const folder = await this.ensureSettingsBackupFolder();
+        if (!folder) return false;
+
+        const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
+        const filePath = normalizePath(folder + "/ttrpg-search-settings-" + stamp + ".json");
+        const payload = this.buildSettingsBackupPayload(reason);
+        try {
+            await this.app.vault.adapter.write(filePath, JSON.stringify(payload, null, 2));
+            this.settings.settingsBackupLastRun = now;
+            // Save only the timestamp. Do not rebuild or notify modals.
+            await this.saveData(this.settings);
+            await this.pruneSettingsBackups(folder);
+            return true;
+        } catch (error) {
+            console.error("TTRPG Search settings backup failed:", error);
+            return false;
+        }
+    }
+    async getSettingsBackupFiles() {
+        const folder = this.getSettingsBackupFolder();
+        if (!folder || !this.app.vault.adapter.list) return [];
+        try {
+            const exists = await this.app.vault.adapter.exists(folder);
+            if (!exists) return [];
+            const listed = await this.app.vault.adapter.list(folder);
+            const files = (listed && Array.isArray(listed.files) ? listed.files : [])
+                .filter((file) => /ttrpg-search-settings-.*\.json$/i.test(file))
+                .sort()
+                .reverse();
+            const out = [];
+            for (const file of files) {
+                let meta = { path: file, createdAt: "", reason: "", indexedEntryCount: null, pluginVersion: "" };
+                try {
+                    const raw = await this.app.vault.adapter.read(file);
+                    const parsed = JSON.parse(raw);
+                    meta.createdAt = parsed.createdAt || "";
+                    meta.reason = parsed.reason || "";
+                    meta.indexedEntryCount = parsed.indexedEntryCount ?? null;
+                    meta.pluginVersion = parsed.pluginVersion || "";
+                    meta.hasSettings = !!(parsed && typeof parsed === "object" && parsed.settings && typeof parsed.settings === "object");
+                } catch (error) {
+                    meta.error = String(error && error.message ? error.message : error);
+                    meta.hasSettings = false;
+                }
+                out.push(meta);
+            }
+            return out;
+        } catch (error) {
+            console.error("TTRPG Search could not list settings backups:", error);
+            return [];
+        }
+    }
+
+    async restoreSettingsBackup(filePath) {
+        const cleanPath = normalizePath(String(filePath || ""));
+        if (!cleanPath) throw new Error("No backup file selected.");
+        const raw = await this.app.vault.adapter.read(cleanPath);
+        const parsed = JSON.parse(raw);
+        const restoredSettings = parsed && parsed.settings && typeof parsed.settings === "object" ? parsed.settings : null;
+        if (!restoredSettings) throw new Error("Backup does not contain a valid settings object.");
+
+        // Safety copy of the current live settings before overwriting them.
+        await this.runSettingsBackup("pre-restore", true);
+
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, restoredSettings);
+        await this.saveData(this.settings);
+        this.refreshConfiguredFolders();
+        this.refreshCustomMaps();
+        this.buildIndex(false);
+        this.notifyModals();
+        return true;
+    }
+
+
+
+    startSettingsBackupScheduler() {
+        const check = () => {
+            window.setTimeout(() => {
+                this.runSettingsBackup("scheduled", false).catch((error) => console.error("TTRPG Search scheduled settings backup failed:", error));
+            }, 0);
+        };
+        this.registerInterval(window.setInterval(check, 60 * 60 * 1000));
+        window.setTimeout(check, 15000);
+    }
+
+
 
     startApplicatorReloadWatcher() {
         const pluginId = this.manifest && this.manifest.id ? this.manifest.id : "ttrpg-search";
@@ -3138,12 +3410,14 @@ class TTRPGVaultSearchPlugin extends Plugin {
         );
         const basenameSourceRaw = inferSourceFromBasename(file.basename);
 
-        const sourceLabel =
+        const inferredSourceLabel =
             resolveSourceLabel(explicitSourceRaw) ||
             resolveSourceLabel(taggedSourceRaw) ||
             resolveSourceLabel(basenameSourceRaw) ||
             resolveSourceLabel(pathSourceRaw) ||
             (collectionInfo ? collectionInfo.name : "");
+        const forcedSourceRaw = findForcedSourceOverride(file.path, inferredType, inferredSourceLabel, file.basename);
+        const sourceLabel = resolveSourceLabel(forcedSourceRaw) || inferredSourceLabel;
 
         const parsed = parseBasenameDetails(
             file.basename,
@@ -3295,6 +3569,112 @@ class TTRPGVaultSearchPlugin extends Plugin {
 class SourceChipEditModal extends Modal {
     constructor(app, plugin, sourceKey, currentLabel) { super(app); this.plugin = plugin; this.sourceKey = sourceKey; this.currentLabel = currentLabel; }
     onOpen() { this.modalEl.classList.add("ttrpg-vs-source-modal"); this.titleEl.setText("Edit Source Chip"); this.contentEl.empty(); const data=this.plugin.getSourceChipData(this.sourceKey); const wrap=this.contentEl.createDiv({cls:"ttrpg-vs-source"}); const labelRow=wrap.createDiv({cls:"ttrpg-vs-source-edit__row"}); labelRow.createDiv({cls:"ttrpg-vs__label", text:"Chip text (can duplicate another source without merging filters)"}); const labelInput=labelRow.createEl("input",{cls:"ttrpg-vs-source-edit__input"}); labelInput.type="text"; labelInput.value=data.label||this.currentLabel||""; const colorRow=wrap.createDiv({cls:"ttrpg-vs-source-edit__row"}); colorRow.createDiv({cls:"ttrpg-vs__label", text:"Chip colour"}); const colorInput=colorRow.createEl("input",{cls:"ttrpg-vs-source-edit__input"}); colorInput.type="color"; colorInput.value=/^#[0-9a-f]{6}$/i.test(data.color||"")?data.color:"#7c3aed"; const buttons=wrap.createDiv({cls:"ttrpg-vs__button-row"}); const saveBtn=buttons.createEl("button",{cls:"ttrpg-vs__toolbutton", text:"Save"}); saveBtn.type="button"; saveBtn.addEventListener("click", async()=>{ await this.plugin.updateSourceChip(this.sourceKey,this.currentLabel,labelInput.value,colorInput.value); this.close(); }); const resetBtn=buttons.createEl("button",{cls:"ttrpg-vs__toolbutton", text:"Reset"}); resetBtn.type="button"; resetBtn.addEventListener("click", async()=>{ await this.plugin.resetSourceChip(this.sourceKey); this.close(); }); window.setTimeout(()=>labelInput.focus(),0); }
+}
+
+
+
+class TTRPGConfirmModal extends Modal {
+    constructor(app, title, message, confirmText, cancelText, onResult) {
+        super(app);
+        this.confirmTitle = title || "Confirm";
+        this.message = message || "";
+        this.confirmText = confirmText || "Confirm";
+        this.cancelText = cancelText || "Cancel";
+        this.onResult = typeof onResult === "function" ? onResult : (() => {});
+        this.resolved = false;
+    }
+    resolve(value) {
+        if (this.resolved) return;
+        this.resolved = true;
+        try { this.onResult(!!value); } catch (error) { console.error("TTRPG confirm callback failed:", error); }
+    }
+    onOpen() {
+        this.modalEl.classList.add("ttrpg-vs-source-modal");
+        this.titleEl.setText(this.confirmTitle);
+        this.contentEl.empty();
+        const wrap = this.contentEl.createDiv({ cls: "ttrpg-vs-source" });
+        wrap.createDiv({ cls: "ttrpg-vs__label", text: this.message });
+        const buttons = wrap.createDiv({ cls: "ttrpg-vs__button-row" });
+        const cancelBtn = buttons.createEl("button", { cls: "ttrpg-vs__toolbutton", text: this.cancelText });
+        cancelBtn.type = "button";
+        cancelBtn.addEventListener("click", () => { this.resolve(false); this.close(); });
+        const confirmBtn = buttons.createEl("button", { cls: "ttrpg-vs__toolbutton", text: this.confirmText });
+        confirmBtn.type = "button";
+        confirmBtn.addEventListener("click", () => { this.resolve(true); this.close(); });
+        window.setTimeout(() => confirmBtn.focus(), 0);
+    }
+    onClose() {
+        this.resolve(false);
+    }
+}
+function ttrpgConfirm(app, title, message, confirmText = "Confirm", cancelText = "Cancel") {
+    return new Promise((resolve) => {
+        new TTRPGConfirmModal(app, title, message, confirmText, cancelText, resolve).open();
+    });
+}
+
+class SettingsBackupRestoreModal extends Modal {
+    constructor(app, plugin) { super(app); this.plugin = plugin; }
+    async onOpen() {
+        this.modalEl.classList.add("ttrpg-vs-source-modal");
+        this.titleEl.setText("Restore TTRPG Search Backup");
+        this.contentEl.empty();
+        const wrap = this.contentEl.createDiv({ cls: "ttrpg-vs-source" });
+        wrap.createDiv({ cls: "ttrpg-vs__label", text: "Loading backups…" });
+        const backups = await this.plugin.getSettingsBackupFiles();
+        wrap.empty();
+        const info = wrap.createDiv({ cls: "ttrpg-vs__label" });
+        info.setText("Choose a backup to restore. A safety backup of the current settings is created before restore. Restore replaces plugin settings/bookmarks/customisations, then rebuilds the index.");
+        if (!backups.length) {
+            wrap.createDiv({ cls: "ttrpg-vs__empty", text: "No backups found in: " + this.plugin.getSettingsBackupFolder() });
+            const buttons = wrap.createDiv({ cls: "ttrpg-vs__button-row" });
+            const closeBtn = buttons.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Close" });
+            closeBtn.type = "button";
+            closeBtn.addEventListener("click", () => this.close());
+            return;
+        }
+        for (const backup of backups) {
+            const row = wrap.createDiv({ cls: "ttrpg-vs-source__item" });
+            row.style.display = "flex";
+            row.style.flexDirection = "column";
+            row.style.gap = "6px";
+            const name = row.createDiv({ cls: "ttrpg-vs-source__name" });
+            const created = backup.createdAt ? new Date(backup.createdAt).toLocaleString() : "Unknown date";
+            name.setText(created + (backup.reason ? " • " + backup.reason : ""));
+            const meta = row.createDiv({ cls: "ttrpg-vs__meta-text" });
+            meta.setText(backup.path + (backup.indexedEntryCount != null ? " • " + backup.indexedEntryCount + " indexed entries" : "") + (backup.pluginVersion ? " • v" + backup.pluginVersion : ""));
+            if (backup.error || !backup.hasSettings) {
+                const err = row.createDiv({ cls: "ttrpg-vs__meta-text" });
+                err.setText("Cannot restore: " + (backup.error || "no settings object found"));
+                continue;
+            }
+            const buttons = row.createDiv({ cls: "ttrpg-vs__button-row" });
+            const restoreBtn = buttons.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Restore this backup" });
+            restoreBtn.type = "button";
+            restoreBtn.addEventListener("click", async () => {
+                const ok = await ttrpgConfirm(
+                    this.app,
+                    "Restore TTRPG Search Backup",
+                    "Restore this TTRPG Search backup? Current settings will first be backed up, then replaced by the selected backup.",
+                    "Restore backup",
+                    "Cancel"
+                );
+                if (!ok) return;
+                restoreBtn.disabled = true;
+                restoreBtn.textContent = "Restoring…";
+                try {
+                    await this.plugin.restoreSettingsBackup(backup.path);
+                    new Notice("TTRPG Search backup restored.");
+                    this.close();
+                } catch (error) {
+                    console.error("TTRPG Search backup restore failed:", error);
+                    new Notice("Restore failed. Check console.");
+                    restoreBtn.disabled = false;
+                    restoreBtn.textContent = "Restore this backup";
+                }
+            });
+        }
+    }
 }
 
 class TTRPGSearchModal extends Modal {
@@ -3773,6 +4153,7 @@ class TTRPGSearchModal extends Modal {
             });
         }
         entries = sortEntries(entries, this.plugin.settings.sortMode || "relevance", trimmedQuery, titleOnly, preScored);
+        if (this.showBookmarksOnly) entries = this.plugin.sortEntriesByBookmarkOrder(entries, this.selectedBookmarkGroup);
 
         // Deduplicate collection entries: show one representative per book/adventure.
         // In bookmarks-only view, individually-bookmarked chapters still show separately
@@ -3834,7 +4215,8 @@ class TTRPGSearchModal extends Modal {
             deduped.push(entry);
         }
 
-        this.visibleEntries = deduped.slice(0, this.plugin.settings.maxResults);
+        const bookmarkOrderedEntries = this.showBookmarksOnly ? this.plugin.sortEntriesByBookmarkOrder(deduped, this.selectedBookmarkGroup) : deduped;
+        this.visibleEntries = bookmarkOrderedEntries.slice(0, this.plugin.settings.maxResults);
 
         if (!this.visibleEntries.length) {
             this.selectedIndex = 0;
@@ -5619,6 +6001,7 @@ class TTRPGReaderView extends ItemView {
         let selectedIndex  = 0;
         let renderedItems  = new Map();
         let virtualQueued  = false;
+        let renderGeneration = 0;
         let collReps       = new Set();
         let collCounts     = new Map();
 
@@ -5716,6 +6099,9 @@ class TTRPGReaderView extends ItemView {
         };
 
         const scheduleVirtualRender = (forceFullRebuild = false) => {
+            // Static bounded rendering: rebuild only when the result set changes.
+            // Scroll events call this without forceFullRebuild, so ignore them once rows exist.
+            if (!forceFullRebuild && renderedItems.size) return;
             if (forceFullRebuild) scheduleVirtualRender.needsFullRebuild = true;
             if (virtualQueued) return;
             virtualQueued = true;
@@ -5804,6 +6190,10 @@ class TTRPGReaderView extends ItemView {
                     selectedSources = new Set([entry.sourceKey]);
                     updateSourceButton(); selectedIndex = 0; refreshResults(true);
                 });
+                chip.addEventListener("contextmenu", (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    new SourceChipEditModal(this.app, this.plugin, entry.sourceKey, entry.sourceLabel).open();
+                });
                 metaEl.appendChild(chip);
             }
             const metaTextEl = document.createElement("span"); metaTextEl.className = "ttrpg-vs__meta-text";
@@ -5838,48 +6228,29 @@ class TTRPGReaderView extends ItemView {
         };
 
         const renderVirtualRows = () => {
-            const forceFullRebuild = !!scheduleVirtualRender.needsFullRebuild;
             scheduleVirtualRender.needsFullRebuild = false;
+            const generation = ++renderGeneration;
+            renderedItems.clear();
+            canvasEl.replaceChildren();
 
-            if (!visibleEntries.length) {
-                renderedItems.clear();
-                canvasEl.replaceChildren();
-                return;
-            }
+            if (!visibleEntries.length) return;
 
-            // Obsidian pop-out windows can briefly report 0px height while a custom
-            // ItemView is settling. Use a safe fallback so the first render still
-            // creates a real window of rows instead of blanking the list.
-            const measuredHeight = viewportH || viewportEl.clientHeight || viewportEl.getBoundingClientRect().height || 600;
-            const scrollTop = Math.max(0, viewportEl.scrollTop || 0);
-            const overscan = Math.max(RESULT_OVERSCAN || 0, 10);
-            const startIndex = Math.max(0, Math.floor(scrollTop / RESULT_ROW_HEIGHT) - overscan);
-            const endIndex = Math.min(
-                visibleEntries.length,
-                Math.ceil((scrollTop + measuredHeight) / RESULT_ROW_HEIGHT) + overscan
-            );
-
-            if (forceFullRebuild) {
-                renderedItems.clear();
-                canvasEl.replaceChildren();
-            } else {
-                for (const [index, el] of renderedItems) {
-                    if (index < startIndex || index >= endIndex) {
-                        el.remove();
-                        renderedItems.delete(index);
-                    }
+            const chunkSize = 40;
+            let i = 0;
+            const renderChunk = () => {
+                if (generation !== renderGeneration) return;
+                const frag = document.createDocumentFragment();
+                const end = Math.min(visibleEntries.length, i + chunkSize);
+                for (; i < end; i++) {
+                    const el = createResultEl(visibleEntries[i], i);
+                    el.style.top = `${i * RESULT_ROW_HEIGHT}px`;
+                    frag.appendChild(el);
+                    renderedItems.set(i, el);
                 }
-            }
-
-            const frag = document.createDocumentFragment();
-            for (let i = startIndex; i < endIndex; i++) {
-                if (renderedItems.has(i)) continue;
-                const el = createResultEl(visibleEntries[i], i);
-                el.style.top = `${i * RESULT_ROW_HEIGHT}px`;
-                frag.appendChild(el);
-                renderedItems.set(i, el);
-            }
-            if (frag.childNodes.length) canvasEl.appendChild(frag);
+                if (frag.childNodes.length) canvasEl.appendChild(frag);
+                if (i < visibleEntries.length) requestAnimationFrame(renderChunk);
+            };
+            renderChunk();
         };
 
         const refreshResults = (resetScroll) => {
@@ -5905,7 +6276,8 @@ class TTRPGReaderView extends ItemView {
                 if (seen.has(e.collectionPath)) continue;
                 seen.add(e.collectionPath); collReps.add(e.path); deduped.push(e);
             }
-            visibleEntries = deduped.slice(0, this.plugin.settings.maxResults);
+            const bookmarkOrderedEntries = showBookmarksOnly ? this.plugin.sortEntriesByBookmarkOrder(deduped, selectedBookmarkGroup) : deduped;
+            visibleEntries = bookmarkOrderedEntries.slice(0, this.plugin.settings.maxResults);
             if (!visibleEntries.length) selectedIndex = 0;
             else selectedIndex = Math.max(0, Math.min(selectedIndex, visibleEntries.length - 1));
             if (resetScroll) viewportEl.scrollTop = 0;
@@ -5959,8 +6331,8 @@ class TTRPGReaderView extends ItemView {
         });
         spellbookBtn.addEventListener("click", () => this.plugin.openSpellbookModal(getSnapshot()));
         popInBtn.addEventListener("click", () => {
-            // Close this search tab and open the search as a normal modal
-            const snap = getSnapshot();
+            // Close this search tab and open the search as a normal modal.
+            const snap = Object.assign({}, getSnapshot(), { forceModal: true });
             this._closeTab(tab.id);
             this.plugin.openSearchModal(snap);
         });
@@ -6757,6 +7129,26 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                 });
             });
 
+        new Setting(containerEl)
+            .setName("Forced source overrides")
+            .setDesc("Force specific files, folders, types, current sources, names, or globs to use a source. One rule per line: matcher => Source. Matchers: path:, glob:, type:, source:, name:. Bare matchers are treated as paths/contains.")
+            .addTextArea((text) => {
+                text.setPlaceholder("type:Action => Player's Handbook\nsource:Arcadia Issue 1 => Player's Handbook\npath:3-Mechanics/CLI/actions/ => Dungeon Master's Guide\nglob:3-Mechanics/CLI/actions/*.md => Player's Handbook");
+                text.setValue(this.plugin.settings.sourceOverridesText || "");
+                text.inputEl.rows = 7;
+                text.onChange(async (value) => {
+                    this.plugin.settings.sourceOverridesText = value;
+                    await this.plugin.saveSettings(false);
+                });
+            });
+        new Setting(containerEl)
+            .setName("Apply forced source overrides")
+            .setDesc("Rebuild the index after editing forced source override rules. This avoids rebuilding the whole vault on every keystroke.")
+            .addButton((button) => button.setButtonText("Apply / rebuild index").onClick(async () => {
+                await this.plugin.saveSettings(true);
+                new Notice("Forced source overrides applied.");
+            }));
+
         this.renderSourceChipSettings(containerEl);
 
         new Setting(containerEl)
@@ -6789,6 +7181,63 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings(true);
                 });
             });
+
+        new Setting(containerEl)
+            .setName("Settings backups")
+            .setDesc("Back up TTRPG Search settings/bookmarks/source customisations to a vault folder outside the plugin folder. These backups are intended to survive plugin corruption or replacement.")
+            .addToggle((toggle) => toggle.setValue(this.plugin.settings.settingsBackupEnabled !== false).onChange(async (value) => {
+                this.plugin.settings.settingsBackupEnabled = value;
+                await this.plugin.saveSettings(false);
+            }));
+
+        new Setting(containerEl)
+            .setName("Backup folder")
+            .setDesc("Vault-relative folder for JSON backups. Keep this outside .obsidian/plugins so plugin corruption or reinstalling does not remove it.")
+            .addText((text) => {
+                text.setPlaceholder("TTRPG Search Backups");
+                text.setValue(this.plugin.settings.settingsBackupFolder || "TTRPG Search Backups");
+                text.onChange(async (value) => {
+                    this.plugin.settings.settingsBackupFolder = value || "TTRPG Search Backups";
+                    await this.plugin.saveSettings(false);
+                });
+            });
+
+        new Setting(containerEl)
+            .setName("Backup frequency")
+            .setDesc("How often to create a backup, in hours. Use 24 for daily backups. Set to 0 to disable scheduled backups without changing the toggle.")
+            .addText((text) => {
+                text.inputEl.type = "number";
+                text.inputEl.min = "0";
+                text.inputEl.step = "1";
+                text.setValue(String(this.plugin.settings.settingsBackupIntervalHours || 24));
+                text.onChange(async (value) => {
+                    const parsed = Number(value);
+                    this.plugin.settings.settingsBackupIntervalHours = Number.isFinite(parsed) ? Math.max(0, parsed) : 24;
+                    await this.plugin.saveSettings(false);
+                });
+            });
+
+        new Setting(containerEl)
+            .setName("Backups to keep")
+            .setDesc("Oldest backup files are removed after this count. Set to 0 to keep all backups.")
+            .addText((text) => {
+                text.inputEl.type = "number";
+                text.inputEl.min = "0";
+                text.inputEl.step = "1";
+                text.setValue(String(this.plugin.settings.settingsBackupMaxFiles || 30));
+                text.onChange(async (value) => {
+                    const parsed = Number(value);
+                    this.plugin.settings.settingsBackupMaxFiles = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 30;
+                    await this.plugin.saveSettings(false);
+                });
+            })
+            .addButton((button) => button.setButtonText("Back up now").onClick(async () => {
+                const ok = await this.plugin.runSettingsBackup("manual", true);
+                new Notice(ok ? "TTRPG Search settings backup created." : "TTRPG Search settings backup failed. Check console.");
+            }))
+            .addButton((button) => button.setButtonText("Restore…").onClick(() => {
+                new SettingsBackupRestoreModal(this.app, this.plugin).open();
+            }));
 
         new Setting(containerEl)
             .setName("Save last search")
