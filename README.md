@@ -15,9 +15,12 @@ It is designed to work with vaults using the output of the [TTRPG‑CLI tool](ht
 
 🧩 Inline search buttons – insert clickable buttons that open specific books, adventures, or chapters
 
-Installation
+Installation:
+
 Copy https://github.com/RedReaper-21/TTRPG-Search/
+
 and go to the BRAT plugin (https://github.com/TfTHacker/obsidian42-brat)
+
 Go to add plugin and use this link
 
 # Quick Start
