@@ -22,6 +22,7 @@ const DEFAULT_SETTINGS = {
     sortMode: "relevance",
     searchTitleOnly: true,
     bookmarks: [],
+    bookmarkDisplayNames: {}, // {path: customDisplayName} - client-sided visual rename
     bookmarkGroups: [],    // [{id: string, name: string}]
     bookmarkTags: {},      // {path: groupId | null}
     bookmarkGroupOrder: {},// {[groupId]: string[]} – custom path order per named group
@@ -39,6 +40,33 @@ const DEFAULT_SETTINGS = {
     settingsBackupFolder: "TTRPG Search Backups",
     settingsBackupMaxFiles: 30,
     settingsBackupLastRun: 0,
+    enableInitiativeTrackerIntegration: true,
+    enableFantasyStatblocksIntegration: true,
+    randomEncounterMinCR: "",
+    randomEncounterMaxCR: "",
+    randomEncounterSources: "",
+    customMonsterImages: {},
+    bestiaryFilterWidth: 280,
+    bestiaryEncounterWidth: 340,
+    bestiaryEncounterMinimised: false,
+    bestiaryEncounterName: "New Encounter",
+    bestiaryEncounter: [],
+    bestiaryPartyRows: [{ level: 5, count: 4 }],
+    bestiaryXpMathMode: "kpfc",
+    bestiaryIncludePartySizeAdjustment: true,
+    bestiaryFleeMortalsDifficulty: "standard",
+    bestiaryFleeMortalsDayBudget: 8,
+    bestiaryFleeMortalsSpent: 0,
+    bestiarySelectedPartyName: "custom",
+    openSpellbookInPopoutByDefault: false,
+    openBestiaryInPopoutByDefault: false,
+    saveLastSpellbookSearch: false,
+    lastSpellbookSearchState: null,
+    saveLastBestiarySearch: false,
+    lastBestiarySearchState: null,
+    searchExclusions: [],      // [{property: string, value: string}] — exclude from normal search
+    bestiaryExclusions: [],    // [{property: string, value: string}] — exclude from bestiary
+    spellbookExclusions: [],   // [{property: string, value: string}] — exclude from spellbook
 };
 
 const COLLATOR = new Intl.Collator(undefined, {
@@ -312,7 +340,7 @@ function isOverviewBasename(value) {
 }
 
 const _escapeHtmlMap = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-const _escapeHtmlRe  = /[&<>"']/g;
+const _escapeHtmlRe = /[&<>"']/g;
 function escapeHtml(text) {
     return String(text || "").replace(_escapeHtmlRe, (c) => _escapeHtmlMap[c]);
 }
@@ -647,7 +675,24 @@ function wordBoundaryIndex(haystack, needle) {
     if (!match || typeof match.index !== "number") return -1;
     return match.index + (match[1] ? match[1].length : 0);
 }
-function scoreTextField(value, query, weight) { const text = String(value || "").toLowerCase(); if (!text || !query) return Number.NEGATIVE_INFINITY; if (text === query) return weight + 320; if (text.startsWith(query)) return weight + 250 - Math.min(45, (text.length - query.length) * 0.12); const boundary = wordBoundaryIndex(text, query); if (boundary >= 0) return weight + 195 - boundary * 0.25; const contains = text.indexOf(query); if (contains >= 0) return weight + 130 - contains * 0.15; const fuzzy = fuzzyPenalty(text, query); if (Number.isFinite(fuzzy) && query.length >= 3) return weight + 40 - fuzzy * 0.7; return Number.NEGATIVE_INFINITY; }
+function scoreTextField(value, query, weight) {
+    const text = String(value || "").toLowerCase();
+    if (!text || !query) return Number.NEGATIVE_INFINITY;
+    if (weight === 100) {
+        const contains = text.indexOf(query);
+        if (contains >= 0) return weight + 130 - contains * 0.001;
+        return Number.NEGATIVE_INFINITY;
+    }
+    if (text === query) return weight + 320;
+    if (text.startsWith(query)) return weight + 250 - Math.min(45, (text.length - query.length) * 0.12);
+    const boundary = wordBoundaryIndex(text, query);
+    if (boundary >= 0) return weight + 195 - boundary * 0.25;
+    const contains = text.indexOf(query);
+    if (contains >= 0) return weight + 130 - contains * 0.15;
+    const fuzzy = fuzzyPenalty(text, query);
+    if (Number.isFinite(fuzzy) && query.length >= 3) return weight + 40 - fuzzy * 0.7;
+    return Number.NEGATIVE_INFINITY;
+}
 function scoreTokenCoverage(fields, tokens) { if (!tokens.length) return 0; let score = 0; for (const token of tokens) { let best = Number.NEGATIVE_INFINITY; for (const field of fields) best = Math.max(best, scoreTextField(field.value, token, field.weight)); if (best === Number.NEGATIVE_INFINITY) return Number.NEGATIVE_INFINITY; score += best; } return score / tokens.length + 130; }
 
 function isIgnorableSourceToken(value, configuredFolderKeys) {
@@ -837,6 +882,200 @@ function parseBasenameDetails(baseName, typeLabel, sourceHint) {
     };
 }
 
+
+const BESTIARY_CR_ORDER = ["0", "1/8", "1/4", "1/2", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30"];
+const BESTIARY_XP_BY_CR = {
+    "0": 10, "1/8": 25, "1/4": 50, "1/2": 100, "1": 200, "2": 450, "3": 700, "4": 1100, "5": 1800,
+    "6": 2300, "7": 2900, "8": 3900, "9": 5000, "10": 5900, "11": 7200, "12": 8400, "13": 10000,
+    "14": 11500, "15": 13000, "16": 15000, "17": 18000, "18": 20000, "19": 22000, "20": 25000,
+    "21": 33000, "22": 41000, "23": 50000, "24": 62000, "25": 75000, "26": 90000, "27": 105000,
+    "28": 120000, "29": 135000, "30": 155000,
+};
+function normalizeCR(value) {
+    const raw = readString(value);
+    if (!raw) return "";
+    const text = String(raw).trim().replace(/^cr\s*/i, "");
+    if (/^0.125$/.test(text)) return "1/8";
+    if (/^0.25$/.test(text)) return "1/4";
+    if (/^0.5$/.test(text)) return "1/2";
+    const compact = text.replace(/\s+/g, "");
+    if (compact.includes("1/8")) return "1/8";
+    if (compact.includes("1/4")) return "1/4";
+    if (compact.includes("1/2")) return "1/2";
+    const num = text.match(/\d+/);
+    return num ? String(Math.max(0, Math.min(30, Number(num[0])))) : "";
+}
+function readFirstString(frontmatter, keys) {
+    return readString(getFrontmatterValue(frontmatter, ...keys)) || "";
+}
+function extractImageLike(frontmatter) {
+    return readFirstString(frontmatter, ["token", "image", "img", "avatar", "portrait", "art", "picture"]);
+}
+function parseStatblockCodeBlock(content) {
+    const data = {};
+    if (!content) return data;
+    const matches = content.matchAll(/```statblock\s*([\s\S]*?)```/g);
+    for (const match of matches) {
+        const blockText = match[1];
+        const lines = blockText.split(/\r?\n/);
+        for (const line of lines) {
+            const m = line.match(/^\s*["']?([a-zA-Z0-9_-]+)["']?\s*:\s*(.*)$/);
+            if (m) {
+                const key = m[1].toLowerCase();
+                let val = m[2].trim();
+                val = val.replace(/^!![a-z]+\s+/i, "");
+                if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                    val = val.slice(1, -1);
+                }
+                data[key] = val;
+            }
+        }
+    }
+    return data;
+}
+
+function extractMonsterMeta(frontmatter, allTags, file, typeLabel, displayName, statblockData = {}) {
+    // 1. Extract CR
+    let crRaw = getFrontmatterValue(frontmatter, "cr", "challenge", "challenge_rating", "challengeRating");
+    if (crRaw == null) {
+        crRaw = statblockData.cr || statblockData.challenge || statblockData.challenge_rating || statblockData.challengerating;
+    }
+    if (crRaw == null && Array.isArray(allTags)) {
+        for (const tag of allTags) {
+            const match = tag.match(/(?:^|\/)(?:monster|creature)\/cr\/([^\/]+)/i);
+            if (match) {
+                crRaw = match[1].replace(/-/g, "/"); // e.g. "1-2" -> "1/2"
+                break;
+            }
+        }
+    }
+    const cr = normalizeCR(crRaw);
+
+    // 2. Extract Type
+    let bestiaryType = readFirstString(frontmatter, ["bestiarytype", "bestiary_type", "monster_type", "monstertype", "type", "creature_type"]);
+    if (!bestiaryType) {
+        bestiaryType = statblockData.bestiarytype || statblockData.bestiary_type || statblockData.monster_type || statblockData.monstertype || statblockData.type || statblockData.creature_type || "";
+    }
+    if (!bestiaryType && Array.isArray(allTags)) {
+        for (const tag of allTags) {
+            const match = tag.match(/(?:^|\/)(?:monster|creature)\/type\/([^\/]+)/i);
+            if (match) {
+                bestiaryType = match[1];
+                break;
+            }
+        }
+    }
+
+    // 3. Extract Size
+    let size = readFirstString(frontmatter, ["size"]);
+    if (!size) {
+        size = statblockData.size || "";
+    }
+    if (!size && Array.isArray(allTags)) {
+        for (const tag of allTags) {
+            const match = tag.match(/(?:^|\/)(?:monster|creature)\/size\/([^\/]+)/i);
+            if (match) {
+                size = match[1];
+                break;
+            }
+        }
+    }
+
+    // 4. Extract Alignment
+    let alignment = readFirstString(frontmatter, ["alignment"]);
+    if (!alignment) {
+        alignment = statblockData.alignment || "";
+    }
+    if (!alignment && Array.isArray(allTags)) {
+        for (const tag of allTags) {
+            const match = tag.match(/(?:^|\/)(?:monster|creature)\/alignment\/([^\/]+)/i);
+            if (match) {
+                alignment = match[1];
+                break;
+            }
+        }
+    }
+
+    // 5. Extract Environment
+    let environmentParts = readStringArray(getFrontmatterValue(frontmatter, "environment", "environments", "terrain", "biome", "habitat"));
+    if (!environmentParts.length && statblockData.environment) {
+        environmentParts = String(statblockData.environment).split(",").map(e => e.trim()).filter(Boolean);
+    }
+    if (!environmentParts.length && Array.isArray(allTags)) {
+        for (const tag of allTags) {
+            const cleanTag = String(tag || "").toLowerCase().trim();
+            const match = cleanTag.match(/(?:^|\/)(?:monster|creature|environment)\/environment\/([^\/]+)/) ||
+                cleanTag.match(/(?:^|\/)environment\/([^\/]+)/);
+            if (match) {
+                const envVal = match[1].replace(/-/g, " ").trim();
+                const formattedEnv = envVal.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+                if (formattedEnv && !environmentParts.includes(formattedEnv)) environmentParts.push(formattedEnv);
+            }
+        }
+    }
+    const environment = environmentParts.join(", ");
+
+    // 6. Extract AC, HP and Image
+    let ac = readFirstString(frontmatter, ["ac", "armor_class", "armorClass"]);
+    if (!ac) ac = statblockData.ac || statblockData.armor_class || statblockData.armorclass || "";
+
+    let hp = readFirstString(frontmatter, ["hp", "hit_points", "hitPoints"]);
+    if (!hp) hp = statblockData.hp || statblockData.hit_points || statblockData.hitpoints || "";
+
+    let image = extractImageLike(frontmatter);
+    if (!image) {
+        image = statblockData.token || statblockData.image || statblockData.img || statblockData.avatar || statblockData.portrait || statblockData.art || statblockData.picture || "";
+    }
+
+    // 7. Extract Hit Dice
+    let hit_dice = readFirstString(frontmatter, ["hit_dice", "hitDice", "hd", "hp_dice"]);
+    if (!hit_dice) hit_dice = statblockData.hit_dice || statblockData.hitdice || statblockData.hd || statblockData.hp_dice || "";
+
+    // 8. Extract Initiative Modifier / stats
+    const stats = getFrontmatterValue(frontmatter, "stats");
+    let dex = getFrontmatterValue(frontmatter, "dex", "dexterity");
+    if (dex == null && stats && Array.isArray(stats) && stats.length > 1) {
+        dex = stats[1];
+    }
+    if (dex == null && statblockData.dex) dex = statblockData.dex;
+    if (dex == null && statblockData.dexterity) dex = statblockData.dexterity;
+    if (dex == null && statblockData.stats) {
+        try {
+            let statsVal = statblockData.stats;
+            if (typeof statsVal === "string") {
+                if (statsVal.startsWith("[") && statsVal.endsWith("]")) {
+                    statsVal = statsVal.slice(1, -1).split(",").map(Number);
+                } else {
+                    statsVal = statsVal.split(",").map(Number);
+                }
+            }
+            if (Array.isArray(statsVal) && statsVal.length > 1) {
+                dex = statsVal[1];
+            }
+        } catch (_) { }
+    }
+
+    let modifier = getFrontmatterValue(frontmatter, "modifier", "init_modifier", "initiative_modifier", "init");
+    if (modifier == null) modifier = statblockData.modifier || statblockData.init_modifier || statblockData.initiative_modifier || statblockData.init;
+    if (modifier == null && dex != null) {
+        modifier = Math.floor((Number(dex) - 10) / 2);
+    }
+
+    return {
+        cr,
+        xp: cr && BESTIARY_XP_BY_CR[cr] ? BESTIARY_XP_BY_CR[cr] : 0,
+        bestiaryType: bestiaryType ? bestiaryType.toLowerCase() : "",
+        size,
+        alignment,
+        environment,
+        ac,
+        hp,
+        image,
+        hit_dice,
+        modifier: modifier != null ? Number(modifier) : 0,
+    };
+}
+
 function buildSearchBlob(entry) {
     const parts = [
         entry.displayName,
@@ -853,6 +1092,14 @@ function buildSearchBlob(entry) {
         if (entry.spellMeta.school) parts.push(entry.spellMeta.school);
         if (entry.spellMeta.classes && entry.spellMeta.classes.length) parts.push(entry.spellMeta.classes.join(" "));
         if (entry.spellMeta.level != null) parts.push(formatSpellLevel(entry.spellMeta.level));
+    }
+
+    if (entry.monsterMeta) {
+        if (entry.monsterMeta.cr) parts.push("cr " + entry.monsterMeta.cr);
+        if (entry.monsterMeta.bestiaryType) parts.push(entry.monsterMeta.bestiaryType);
+        if (entry.monsterMeta.environment) parts.push(entry.monsterMeta.environment);
+        if (entry.monsterMeta.size) parts.push(entry.monsterMeta.size);
+        if (entry.monsterMeta.alignment) parts.push(entry.monsterMeta.alignment);
     }
 
     return parts.join(" | ").toLowerCase();
@@ -886,7 +1133,12 @@ function scoreEntry(entry, query, titleOnly = false) {
         { value: (entry.sourceLabel || "").toLowerCase(), weight: 470 },
         { value: (entry.typeLabel || "").toLowerCase(), weight: 430 },
     ];
-    if (!titleOnly) fields.push({ value: entry.pathLower || "", weight: 245 }, { value: entry.searchBlob || "", weight: 190 });
+    if (!titleOnly) {
+        fields.push({ value: entry.pathLower || "", weight: 245 }, { value: entry.searchBlob || "", weight: 190 });
+        if (entry.fileContentLower) {
+            fields.push({ value: entry.fileContentLower, weight: 100 });
+        }
+    }
     let best = Number.NEGATIVE_INFINITY;
     for (const field of fields) best = Math.max(best, scoreTextField(field.value, q, field.weight));
     const tokenScore = scoreTokenCoverage(fields, tokenizeSearchQuery(q));
@@ -917,7 +1169,9 @@ function entriesEqual(a, b) {
         a.collectionKind === b.collectionKind &&
         a.isOverview === b.isOverview &&
         a.searchBlob === b.searchBlob &&
-        sameStringArray(a.aliases, b.aliases)
+        sameStringArray(a.aliases, b.aliases) &&
+        JSON.stringify(a.spellMeta) === JSON.stringify(b.spellMeta) &&
+        JSON.stringify(a.monsterMeta) === JSON.stringify(b.monsterMeta)
     );
 }
 
@@ -963,14 +1217,133 @@ function collectionDepth(entry) {
 
 function sortEntries(entries, sortMode, query, titleOnly = false, preScored = null) {
     const list = [...entries];
-    if (sortMode === "name") { list.sort((a,b)=>COLLATOR.compare(a.collectionKind ? `${a.collectionName} - ${a.displayName}` : a.displayName, b.collectionKind ? `${b.collectionName} - ${b.displayName}` : b.displayName)||COLLATOR.compare(a.path,b.path)); return list; }
-    if (sortMode === "source") { list.sort((a,b)=>COLLATOR.compare(a.sourceLabel||"zzz",b.sourceLabel||"zzz")||COLLATOR.compare(a.collectionName||a.displayName,b.collectionName||b.displayName)||COLLATOR.compare(a.displayName,b.displayName)||COLLATOR.compare(a.path,b.path)); return list; }
-    if (sortMode === "type") { list.sort((a,b)=>COLLATOR.compare(a.typeLabel,b.typeLabel)||COLLATOR.compare(a.collectionName||a.displayName,b.collectionName||b.displayName)||COLLATOR.compare(a.displayName,b.displayName)||COLLATOR.compare(a.path,b.path)); return list; }
     const getScore = preScored
         ? (entry) => preScored.get(entry.path) ?? scoreEntry(entry, query, titleOnly)
         : (() => { const cache = new Map(); return (entry) => { let s = cache.get(entry.path); if (s === undefined) { s = scoreEntry(entry, query, titleOnly); cache.set(entry.path, s); } return s; }; })();
-    list.sort((a,b)=>getScore(b)-getScore(a)||COLLATOR.compare(a.collectionName||a.displayName,b.collectionName||b.displayName)||COLLATOR.compare(a.displayName,b.displayName)||COLLATOR.compare(a.path,b.path));
+
+    if (sortMode === "name") {
+        list.sort((a, b) => 
+            COLLATOR.compare(a.collectionKind ? `${a.collectionName} - ${a.displayName}` : a.displayName, b.collectionKind ? `${b.collectionName} - ${b.displayName}` : b.displayName) || 
+            (getScore(b) - getScore(a)) || 
+            COLLATOR.compare(a.path, b.path)
+        );
+        return list;
+    }
+    if (sortMode === "source") {
+        list.sort((a, b) => 
+            COLLATOR.compare(a.sourceLabel || "zzz", b.sourceLabel || "zzz") || 
+            (getScore(b) - getScore(a)) || 
+            COLLATOR.compare(a.collectionName || a.displayName, b.collectionName || b.displayName) || 
+            COLLATOR.compare(a.displayName, b.displayName) || 
+            COLLATOR.compare(a.path, b.path)
+        );
+        return list;
+    }
+    if (sortMode === "type") {
+        list.sort((a, b) => 
+            COLLATOR.compare(a.typeLabel, b.typeLabel) || 
+            (getScore(b) - getScore(a)) || 
+            COLLATOR.compare(a.collectionName || a.displayName, b.collectionName || b.displayName) || 
+            COLLATOR.compare(a.displayName, b.displayName) || 
+            COLLATOR.compare(a.path, b.path)
+        );
+        return list;
+    }
+    
+    list.sort((a, b) => 
+        (getScore(b) - getScore(a)) || 
+        COLLATOR.compare(a.collectionName || a.displayName, b.collectionName || b.displayName) || 
+        COLLATOR.compare(a.displayName, b.displayName) || 
+        COLLATOR.compare(a.path, b.path)
+    );
     return list;
+}
+
+function highlightAndScrollToQuery(containerEl, query) {
+    if (!query || !query.trim()) return;
+    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return;
+
+    const walkTextNodes = (node, callback) => {
+        if (node.nodeType === 3) {
+            callback(node);
+        } else if (node.nodeType === 1 && node.childNodes && 
+                   !/^(style|script|textarea)$/i.test(node.tagName) &&
+                   !node.classList.contains("ttrpg-vs__chip")) {
+            const children = Array.from(node.childNodes);
+            for (let i = 0; i < children.length; i++) {
+                walkTextNodes(children[i], callback);
+            }
+        }
+    };
+
+    const nodesToReplace = [];
+    walkTextNodes(containerEl, (node) => {
+        const text = node.nodeValue;
+        const textLower = text.toLowerCase();
+        
+        const fullQuery = terms.join(" ");
+        let idx = textLower.indexOf(fullQuery);
+        let matchLen = fullQuery.length;
+        
+        if (idx === -1) {
+            idx = textLower.indexOf(terms[0]);
+            matchLen = terms[0].length;
+        }
+
+        if (idx >= 0 && matchLen > 0) {
+            nodesToReplace.push({ node, idx, matchLen, fullQuery, firstTerm: terms[0] });
+        }
+    });
+
+    let firstHighlightedEl = null;
+    for (const item of nodesToReplace) {
+        const { node, idx, matchLen, fullQuery, firstTerm } = item;
+        const text = node.nodeValue;
+        const textLower = text.toLowerCase();
+        const parent = node.parentNode;
+        if (!parent) continue;
+
+        const frag = document.createDocumentFragment();
+        let lastIdx = 0;
+        
+        while (true) {
+            let nextIdx = textLower.indexOf(fullQuery, lastIdx);
+            let len = fullQuery.length;
+            if (nextIdx === -1) {
+                nextIdx = textLower.indexOf(firstTerm, lastIdx);
+                len = firstTerm.length;
+            }
+            if (nextIdx === -1) break;
+            
+            if (nextIdx > lastIdx) {
+                frag.appendChild(document.createTextNode(text.slice(lastIdx, nextIdx)));
+            }
+            const mark = document.createElement("mark");
+            mark.className = "ttrpg-search-highlight";
+            mark.textContent = text.slice(nextIdx, nextIdx + len);
+            mark.style.backgroundColor = "var(--text-highlight-bg, rgba(255, 222, 115, 0.4))";
+            mark.style.color = "inherit";
+            mark.style.padding = "0 2px";
+            mark.style.borderRadius = "2px";
+            frag.appendChild(mark);
+            
+            if (!firstHighlightedEl) {
+                firstHighlightedEl = mark;
+            }
+            lastIdx = nextIdx + len;
+        }
+        if (lastIdx < text.length) {
+            frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+        }
+        parent.replaceChild(frag, node);
+    }
+
+    if (firstHighlightedEl) {
+        setTimeout(() => {
+            firstHighlightedEl.scrollIntoView({ block: "center", behavior: "smooth" });
+        }, 100);
+    }
 }
 
 function copyTextToClipboard(text) {
@@ -1371,6 +1744,9 @@ const EMBEDDED_STYLES = `
     flex-wrap: wrap;
     align-items: baseline;
     gap: 6px;
+    border-bottom: 2px solid var(--background-modifier-hover);
+    padding-bottom: 4px;
+    margin-bottom: 8px;
 }
 .ttrpg-vs__title-piece,
 .ttrpg-vs__title-sep {
@@ -1403,27 +1779,38 @@ const EMBEDDED_STYLES = `
     flex-wrap: wrap;
     min-width: 0;
 }
-.ttrpg-vs__chip,
-.ttrpg-vs__badge {
-    display: inline-flex;
-    align-items: center;
+.ttrpg-vs__chip {
+    display: inline-block;
+    vertical-align: middle;
     max-width: 100%;
-    padding: 2px 8px;
+    text-align: left;
+    box-sizing: border-box;
+    padding: 4px 10px;
     border-radius: 999px;
-    font-size: 11px;
-    line-height: 1.35;
-    border: 1px solid var(--background-modifier-border);
+    font-size: 14px;
+    line-height: 1.25;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-}
-.ttrpg-vs__chip {
+    border: 2px solid #ffffff;
     background: color-mix(in srgb, var(--interactive-accent) 12%, var(--background-secondary));
     color: var(--text-normal);
     font-weight: 700;
-    flex-shrink: 0;
 }
 .ttrpg-vs__badge {
+    display: inline-block;
+    vertical-align: middle;
+    text-align: left;
+    box-sizing: border-box;
+    max-width: 100%;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border: 1px solid var(--background-modifier-border);
     background: var(--background-secondary);
     color: var(--text-normal);
     font-weight: 600;
@@ -1760,7 +2147,8 @@ const EMBEDDED_STYLES = `
 }
 
 
-.ttrpg-vs__chip--source { --ttrpg-source-color: var(--interactive-accent); background: color-mix(in srgb, var(--ttrpg-source-color) 18%, var(--background-secondary)); border-color: color-mix(in srgb, var(--ttrpg-source-color) 55%, var(--background-modifier-border)); }
+.ttrpg-vs__chip--source { --ttrpg-source-color: var(--interactive-accent); background: color-mix(in srgb, var(--ttrpg-source-color) 18%, var(--background-secondary)); }
+.ttrpg-vs__chip--has-custom-color { border-color: color-mix(in srgb, var(--ttrpg-source-color) 55%, var(--background-modifier-border)) !important; }
 .ttrpg-vs__chip--source:hover { background: color-mix(in srgb, var(--ttrpg-source-color) 28%, var(--background-secondary)); }
 .ttrpg-reader__content { font-size: var(--font-text-size); font-family: var(--font-text); line-height: var(--line-height-normal); }
 .ttrpg-reader__content .markdown-rendered, .ttrpg-reader__content .markdown-preview-view { max-width: var(--file-line-width, 700px); margin: 0 auto; width: 100%; }
@@ -1772,10 +2160,17 @@ const EMBEDDED_STYLES = `
 .ttrpg-vs-source-chip-manager__input { width:100%; box-sizing:border-box; padding:6px 8px; border-radius:8px; border:1px solid var(--background-modifier-border); background:var(--background-primary); color:var(--text-normal); }
 
 /* Clickable chip / badge variants */
-button.ttrpg-vs__chip,
+button.ttrpg-vs__chip {
+    font-family: inherit;
+    outline: none;
+    text-align: center;
+    justify-content: center;
+}
 button.ttrpg-vs__badge {
     font-family: inherit;
     outline: none;
+    text-align: left;
+    justify-content: flex-start;
 }
 .ttrpg-vs__chip--clickable {
     cursor: pointer;
@@ -1938,9 +2333,9 @@ button.ttrpg-vs__badge {
     color: var(--text-normal);
     flex: 1 1 auto;
     min-width: 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 .ttrpg-vs-bm__group-count {
     font-size: 11px;
@@ -2194,6 +2589,31 @@ mark.ttrpg-reader__find-match.is-current {
 .ttrpg-popout__panel.is-reader { padding: 0; }
 .ttrpg-popout__panel.is-reader .ttrpg-reader { height: 100%; min-height: 0; }
 
+.ttrpg-vs-bestiary-modal {
+    width: min(1680px, 98vw);
+    height: min(94vh, 1040px);
+}
+.ttrpg-vs-bestiary-modal .modal-content {
+    height: 100%;
+    overflow: hidden;
+}
+.ttrpg-vs-bestiary-modal input,
+.ttrpg-vs-bestiary-modal select,
+.ttrpg-vs-bestiary-modal button {
+    box-sizing: border-box;
+}
+/* Bestiary-only: stretch source chips to full width */
+.ttrpg-vs-best-root .ttrpg-vs__chip {
+    display: block;
+    width: 100%;
+    text-align: center;
+}
+.ttrpg-bestiary-popout-view .ttrpg-vs__chip {
+    display: block;
+    width: 100%;
+    text-align: center;
+}
+
 /* ── Spellbook ──────────────────────────────────────────────────────────────── */
 .ttrpg-sb-modal {
     width: min(1180px, 96vw);
@@ -2227,6 +2647,16 @@ mark.ttrpg-reader__find-match.is-current {
 .ttrpg-sb__level-7  { background: color-mix(in srgb, #2dd4bf 15%, var(--background-secondary)); border-color: #2dd4bf44; color: #2dd4bf; }
 .ttrpg-sb__level-8  { background: color-mix(in srgb, #818cf8 15%, var(--background-secondary)); border-color: #818cf844; color: #818cf8; }
 .ttrpg-sb__level-9  { background: color-mix(in srgb, #fb7185 15%, var(--background-secondary)); border-color: #fb718544; color: #fb7185; }
+
+/* Spell schools — color-coded by school of magic */
+.ttrpg-sb__school-badge--abjuration { background: color-mix(in srgb, var(--color-cyan, #06b6d4) 15%, var(--background-secondary)); border: 2px solid color-mix(in srgb, var(--color-cyan, #06b6d4) 40%, var(--background-modifier-border)); color: var(--color-cyan, #06b6d4); }
+.ttrpg-sb__school-badge--conjuration { background: color-mix(in srgb, var(--color-purple, #a855f7) 15%, var(--background-secondary)); border: 2px solid color-mix(in srgb, var(--color-purple, #a855f7) 40%, var(--background-modifier-border)); color: var(--color-purple, #a855f7); }
+.ttrpg-sb__school-badge--divination { background: color-mix(in srgb, var(--color-yellow, #eab308) 15%, var(--background-secondary)); border: 2px solid color-mix(in srgb, var(--color-yellow, #eab308) 40%, var(--background-modifier-border)); color: var(--color-yellow, #eab308); }
+.ttrpg-sb__school-badge--enchantment { background: color-mix(in srgb, var(--color-pink, #ec4899) 15%, var(--background-secondary)); border: 2px solid color-mix(in srgb, var(--color-pink, #ec4899) 40%, var(--background-modifier-border)); color: var(--color-pink, #ec4899); }
+.ttrpg-sb__school-badge--evocation { background: color-mix(in srgb, var(--color-red, #ef4444) 15%, var(--background-secondary)); border: 2px solid color-mix(in srgb, var(--color-red, #ef4444) 40%, var(--background-modifier-border)); color: var(--color-red, #ef4444); }
+.ttrpg-sb__school-badge--illusion { background: color-mix(in srgb, var(--color-indigo, #6366f1) 15%, var(--background-secondary)); border: 2px solid color-mix(in srgb, var(--color-indigo, #6366f1) 40%, var(--background-modifier-border)); color: var(--color-indigo, #6366f1); }
+.ttrpg-sb__school-badge--necromancy { background: color-mix(in srgb, var(--color-green, #22c55e) 15%, var(--background-secondary)); border: 2px solid color-mix(in srgb, var(--color-green, #22c55e) 40%, var(--background-modifier-border)); color: var(--color-green, #22c55e); }
+.ttrpg-sb__school-badge--transmutation { background: color-mix(in srgb, var(--color-orange, #f97316) 15%, var(--background-secondary)); border: 2px solid color-mix(in srgb, var(--color-orange, #f97316) 40%, var(--background-modifier-border)); color: var(--color-orange, #f97316); }
 
 @media (max-width: 760px) {
     .ttrpg-sb__filters {
@@ -2341,12 +2771,101 @@ mark.ttrpg-reader__find-match.is-current {
     padding-top: 6px !important;
     padding-bottom: 6px !important;
 }
+
+/* Allow text selection inside reader content */
+.ttrpg-reader__content, .ttrpg-reader__content * {
+    user-select: text !important;
+    -webkit-user-select: text !important;
+}
+
+/* Hide edit elements in hover previews */
+.hover-popover .clickable-icon[title*="Edit" i],
+.hover-popover .view-action[title*="Edit" i],
+.hover-popover .hover-editor-titlebar-edit {
+    display: none !important;
+}
+
+/* Settings panel grouping styles */
+.ttrpg-settings-group {
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    margin-bottom: 16px;
+    background: var(--background-secondary-alt);
+    overflow: hidden;
+}
+.ttrpg-settings-group-title {
+    padding: 10px 14px;
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    background: var(--background-secondary);
+    user-select: none;
+    outline: none;
+    transition: background 0.1s ease;
+    display: list-item;
+}
+.ttrpg-settings-group-title:hover {
+    background: var(--background-modifier-hover);
+}
+.ttrpg-settings-group-content {
+    padding: 12px 14px 14px;
+    border-top: 1px solid var(--background-modifier-border);
+    background: var(--background-primary);
+}
+.ttrpg-settings-subdetails {
+    margin-top: 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-primary);
+    overflow: hidden;
+}
+.ttrpg-settings-subdetails-title {
+    padding: 8px 12px;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    background: var(--background-secondary-alt);
+    user-select: none;
+    outline: none;
+    transition: background 0.1s ease;
+    display: list-item;
+}
+.ttrpg-settings-subdetails-title:hover {
+    background: var(--background-modifier-hover);
+}
+.ttrpg-settings-subdetails > p {
+    margin: 8px 12px 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+.ttrpg-settings-subdetails > div,
+.ttrpg-settings-subdetails > button {
+    margin: 0 12px;
+}
+.ttrpg-settings-subdetails[open] {
+    padding-bottom: 10px;
+}
+.ttrpg-settings-subdetails[open] .ttrpg-settings-subdetails-title {
+    border-bottom: 1px solid var(--background-modifier-border);
+    margin-bottom: 10px;
+}
 `;
 const TTRPG_READER_VIEW_TYPE = "ttrpg-reader-view";
+const TTRPG_SPELLBOOK_VIEW_TYPE = "ttrpg-spellbook-view";
+const TTRPG_SEARCH_VIEW_TYPE = "ttrpg-search-view";
 
 class TTRPGVaultSearchPlugin extends Plugin {
     async onload() {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        this.hoverPopover = null;
+        this.registerHoverLinkSource("ttrpg-search", {
+            display: "TTRPG Search",
+            defaultMod: true
+        });
+
+        this.statusBarItem = this.addStatusBarItem();
+        this.statusBarItem.setText("");
 
         this.entryMap = new Map();
         this.index = [];
@@ -2354,11 +2873,15 @@ class TTRPGVaultSearchPlugin extends Plugin {
         this.configuredFolderKeys = new Set();
         this.activeModals = new Set();
         this._cachedSearchState = null;    // fast in-memory last-search cache
+        this._cachedSpellbookSearchState = null;
+        this._cachedBestiarySearchState = null;
         this._pendingReaderState = null;   // handoff to TTRPGReaderView on open
+        this._bestiaryEntriesCache = null;
+        this._spellEntriesCache = null;
 
         this.pendingPaths = new Set();
         this.didInitialResolvedRebuild = false;
-        this.flushPendingUpdates = debounce(() => this.applyPendingUpdates(), 250, false);
+        this.flushPendingUpdates = debounce(() => { void this.applyPendingUpdates(); }, 250, false);
 
         this.refreshConfiguredFolders();
         this.refreshCustomMaps();
@@ -2366,6 +2889,9 @@ class TTRPGVaultSearchPlugin extends Plugin {
         this.startSettingsBackupScheduler();
 
         this.registerView(TTRPG_READER_VIEW_TYPE, (leaf) => new TTRPGReaderView(leaf, this));
+        this.registerView(TTRPG_BESTIARY_VIEW_TYPE, (leaf) => new TTRPGBestiaryView(leaf, this));
+        this.registerView(TTRPG_SPELLBOOK_VIEW_TYPE, (leaf) => new TTRPGSpellbookView(leaf, this));
+        this.registerView(TTRPG_SEARCH_VIEW_TYPE, (leaf) => new TTRPGSearchView(leaf, this));
 
         this.addCommand({
             id: "open-ttrpg-vault-search",
@@ -2377,6 +2903,12 @@ class TTRPGVaultSearchPlugin extends Plugin {
             id: "open-ttrpg-spellbook",
             name: "Open TTRPG Spellbook",
             callback: () => this.openSpellbookModal(),
+        });
+
+        this.addCommand({
+            id: "open-ttrpg-bestiary",
+            name: "Open TTRPG Bestiary / Encounter Builder",
+            callback: () => this.openBestiaryModal(),
         });
 
         this.addCommand({
@@ -2414,6 +2946,10 @@ class TTRPGVaultSearchPlugin extends Plugin {
             this.openSpellbookModal();
         });
 
+        this.addRibbonIcon("swords", "Open TTRPG Bestiary", () => {
+            this.openBestiaryModal();
+        });
+
         this.addSettingTab(new TTRPGVaultSearchSettingTab(this.app, this));
 
         this.startApplicatorReloadWatcher();
@@ -2434,6 +2970,34 @@ class TTRPGVaultSearchPlugin extends Plugin {
         );
 
         this.buildIndex(false);
+
+        // Global read-only enforcement inside hover popovers.
+        // Blocks all editing while allowing navigation & copy.
+        const SAFE_KEYS = new Set(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","PageUp","PageDown","Home","End","Tab","Escape","Shift","Control","Meta","Alt","F5"]);
+        const isInHoverPopover = (el) => !!el.closest(".hover-popover");
+        const hoverReadOnlyKeydown = (e) => {
+            if (!isInHoverPopover(e.target)) return;
+            // Allow Ctrl/Cmd+C (copy) and Ctrl/Cmd+A (select-all)
+            if ((e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "a")) return;
+            if (SAFE_KEYS.has(e.key)) return;
+            e.preventDefault();
+            e.stopPropagation();
+        };
+        const hoverReadOnlyBlock = (e) => {
+            if (isInHoverPopover(e.target)) { e.preventDefault(); e.stopPropagation(); }
+        };
+        window.addEventListener("keydown", hoverReadOnlyKeydown, true);
+        window.addEventListener("paste",   hoverReadOnlyBlock,   true);
+        window.addEventListener("cut",     hoverReadOnlyBlock,   true);
+        window.addEventListener("drop",    hoverReadOnlyBlock,   true);
+        window.addEventListener("dblclick",hoverReadOnlyBlock,   true);
+        this.register(() => {
+            window.removeEventListener("keydown", hoverReadOnlyKeydown, true);
+            window.removeEventListener("paste",   hoverReadOnlyBlock,   true);
+            window.removeEventListener("cut",     hoverReadOnlyBlock,   true);
+            window.removeEventListener("drop",    hoverReadOnlyBlock,   true);
+            window.removeEventListener("dblclick",hoverReadOnlyBlock,   true);
+        });
     }
 
     onunload() {
@@ -2458,6 +3022,141 @@ class TTRPGVaultSearchPlugin extends Plugin {
         ACTIVE_FOLDER_TYPE_MAP = parseTypeFolderMappingsText(this.settings.typeFolderMappingsText || "");
         ACTIVE_SOURCE_OVERRIDE_RULES = parseSourceOverrideRulesText(this.settings.sourceOverridesText || "");
     }
+    openBestiaryModal(initialState = null) {
+        const state = initialState || (this.settings.saveLastBestiarySearch ? (this._cachedBestiarySearchState || this.settings.lastBestiarySearchState || null) : null);
+        const shouldPopout = (this.settings.openBestiaryInPopoutByDefault || (state && state.wasPopout)) && !(state && state.forceModal);
+        if (shouldPopout) {
+            if (state) state.wasPopout = true;
+            void this.openBestiaryPopout(state);
+            return;
+        }
+        new TTRPGBestiaryModal(this.app, this, state).open();
+    }
+    async openBestiaryPopout(initialState = null) {
+        try {
+            const leaf = this.app.workspace.getLeaf("window");
+            await leaf.setViewState({ type: TTRPG_BESTIARY_VIEW_TYPE, active: true });
+            const view = leaf.view;
+            if (view && typeof view.initBestiaryView === "function") {
+                view.initBestiaryView(initialState);
+            }
+        } catch (err) {
+            new Notice("Could not open pop-out window — Obsidian 1.1+ required.");
+            console.error("TTRPG Bestiary pop-out error:", err);
+        }
+    }
+    async openSpellbookPopout(initialState = null) {
+        try {
+            const leaf = this.app.workspace.getLeaf("window");
+            await leaf.setViewState({ type: TTRPG_SPELLBOOK_VIEW_TYPE, active: true });
+            const view = leaf.view;
+            if (view && typeof view.initSpellbookView === "function") {
+                view.initSpellbookView(initialState);
+            }
+        } catch (err) {
+            new Notice("Could not open pop-out window — Obsidian 1.1+ required.");
+            console.error("TTRPG Spellbook pop-out error:", err);
+        }
+    }
+
+    getBestiaryEntries() {
+        if (this._bestiaryEntriesCache) return this._bestiaryEntriesCache;
+        const bestiaryExcl = this.settings.bestiaryExclusions;
+        this._bestiaryEntriesCache = this.getEntries().filter((entry) => {
+            if (!entry) return false;
+            if (bestiaryExcl && bestiaryExcl.length && this._entryMatchesExclusions(entry, bestiaryExcl)) return false;
+            const path = normalizePath(entry.path || "");
+            const filename = path.split("/").pop().toLowerCase();
+            if (filename.includes("index") || entry.typeKey === "index") {
+                return false;
+            }
+            if (entry.typeKey === "monster") return true;
+            if (entry.monsterMeta && (entry.monsterMeta.cr || entry.monsterMeta.bestiaryType || entry.monsterMeta.environment || entry.monsterMeta.xp)) return true;
+            if (/(^|\/)(bestiary|bestiaries|monster|monsters|creature|creatures)(\/|$)/i.test(path)) return true;
+            return false;
+        }).map(entry => {
+            if (entry.monsterMeta) {
+                const meta = entry.monsterMeta;
+                let hasResolvedFS = meta._hasResolvedFS || false;
+                if (!hasResolvedFS && this.settings.enableFantasyStatblocksIntegration !== false && window.FantasyStatblocks && typeof window.FantasyStatblocks.getCreatureFromBestiary === "function") {
+                    try {
+                        const name = entry.collectionName || entry.displayName || entry.fileLabel || entry.path;
+                        const fs = window.FantasyStatblocks.getCreatureFromBestiary(name);
+                        if (fs) {
+                            if (meta.cr == null || meta.cr === "") meta.cr = fs.cr;
+                            if (meta.ac == null || meta.ac === "") meta.ac = fs.ac || fs.armor_class;
+                            if (meta.hp == null || meta.hp === "") meta.hp = fs.hp || fs.hit_points;
+                            if (meta.alignment == null || meta.alignment === "") meta.alignment = fs.alignment;
+                            if (meta.bestiaryType == null || meta.bestiaryType === "") meta.bestiaryType = fs.type;
+                            if (meta.hit_dice == null || meta.hit_dice === "") meta.hit_dice = fs.hit_dice || fs.hitDice;
+                            if (meta.modifier == null || meta.modifier === 0) {
+                                const stats = fs.stats || fs.abilities;
+                                const dex = fs.dex || fs.dexterity || (stats && (Array.isArray(stats) ? stats[1] : stats.dex));
+                                if (dex != null) meta.modifier = Math.floor((Number(dex) - 10) / 2);
+                            }
+                        }
+                    } catch (_) { }
+                    meta._hasResolvedFS = true;
+                }
+
+                if (meta.cr && (meta.xp == null || meta.xp === "" || meta.xp === 0) && typeof BESTIARY_XP_BY_CR !== "undefined") {
+                    meta.xp = BESTIARY_XP_BY_CR[String(meta.cr)] || 0;
+                }
+
+                if (meta.bestiaryType && meta._normalizedTypeKey === undefined) {
+                    meta._normalizedTypeKey = normalizeKey(meta.bestiaryType);
+                }
+                if (meta.alignment && meta._normalizedAlignmentKey === undefined) {
+                    meta._normalizedAlignmentKey = normalizeKey(meta.alignment);
+                }
+            }
+            return entry;
+        });
+        return this._bestiaryEntriesCache;
+    }
+
+    getSpellEntries() {
+        if (this._spellEntriesCache) return this._spellEntriesCache;
+        const spellExcl = this.settings.spellbookExclusions;
+        this._spellEntriesCache = this.getEntries().filter((entry) => {
+            if (!entry || entry.typeKey !== "spell") return false;
+            if (spellExcl && spellExcl.length && this._entryMatchesExclusions(entry, spellExcl)) return false;
+            return true;
+        }).map(entry => {
+            if (entry.spellMeta) {
+                if (entry.spellMeta.school && entry.spellMeta._normalizedSchoolKey === undefined) {
+                    entry.spellMeta._normalizedSchoolKey = normalizeKey(entry.spellMeta.school);
+                }
+                if (Array.isArray(entry.spellMeta.classes)) {
+                    if (entry.spellMeta._normalizedClassesKeys === undefined) {
+                        entry.spellMeta._normalizedClassesKeys = entry.spellMeta.classes.map(normalizeKey);
+                    }
+                } else {
+                    entry.spellMeta._normalizedClassesKeys = [];
+                }
+            }
+            return entry;
+        });
+        return this._spellEntriesCache;
+    }
+
+    getBestiaryFavorites() {
+        return Array.isArray(this.settings.bestiaryFavorites) ? [...this.settings.bestiaryFavorites] : [];
+    }
+
+    isBestiaryFavorite(path) {
+        return this.getBestiaryFavorites().includes(path);
+    }
+
+    async toggleBestiaryFavorite(path) {
+        const set = new Set(this.getBestiaryFavorites());
+        if (set.has(path)) set.delete(path); else set.add(path);
+        this.settings.bestiaryFavorites = [...set];
+        await this.saveSettings(false);
+        this.notifyModals();
+    }
+
+
 
     openSearchModal(initialState = null) {
         if (initialState && initialState.mode === "spellbook") {
@@ -2473,7 +3172,14 @@ class TTRPGVaultSearchPlugin extends Plugin {
     }
 
     openSpellbookModal(initialState = null) {
-        new TTRPGSpellbookModal(this.app, this, initialState).open();
+        const state = initialState || (this.settings.saveLastSpellbookSearch ? (this._cachedSpellbookSearchState || this.settings.lastSpellbookSearchState || null) : null);
+        const shouldPopout = (this.settings.openSpellbookInPopoutByDefault || (state && state.isPopout)) && !(state && state.forceModal);
+        if (shouldPopout) {
+            if (state) state.isPopout = true;
+            void this.openSpellbookPopout(state);
+            return;
+        }
+        new TTRPGSpellbookModal(this.app, this, state).open();
     }
 
     // ── Spell bookmarks (isolated from main bookmarks) ────────────────────────
@@ -2507,13 +3213,28 @@ class TTRPGVaultSearchPlugin extends Plugin {
     async openSearchPopout(initialState) {
         try {
             const leaf = this.app.workspace.getLeaf("window");
-            await leaf.setViewState({ type: TTRPG_READER_VIEW_TYPE, active: true });
-            if (leaf.view && typeof leaf.view.initSearchView === "function") {
-                leaf.view.initSearchView(initialState);
+            await leaf.setViewState({ type: TTRPG_SEARCH_VIEW_TYPE, active: true });
+            // The view may not be ready immediately after setViewState in pop-out windows.
+            // Retry a few times with a short delay before giving up.
+            let view = leaf.view;
+            if (!view || typeof view.initSearchView !== "function") {
+                for (let attempt = 0; attempt < 10; attempt++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    view = leaf.view;
+                    if (view && typeof view.initSearchView === "function") break;
+                }
+            }
+            if (view && typeof view.initSearchView === "function") {
+                view.initSearchView(initialState);
+            } else {
+                console.warn("TTRPG: pop-out view not ready after retries, falling back to modal.");
+                try { leaf.detach(); } catch (_) { /* ignore */ }
+                new TTRPGSearchModal(this.app, this, initialState).open();
             }
         } catch (err) {
-            new Notice("Could not open pop-out window — Obsidian 1.1+ required.");
             console.error("TTRPG pop-out error:", err);
+            // Fallback to modal instead of just showing an error
+            new TTRPGSearchModal(this.app, this, initialState).open();
         }
     }
     async openReaderInWindow(entries, initialIndex, searchState) {
@@ -2537,8 +3258,56 @@ class TTRPGVaultSearchPlugin extends Plugin {
         this.activeModals.delete(modal);
     }
 
+    getBestiaryController() {
+        for (const modal of this.activeModals) {
+            if (modal.controller && (modal instanceof TTRPGBestiaryModal || (modal.getViewType && modal.getViewType() === "ttrpg-bestiary-view"))) {
+                return modal.controller;
+            }
+        }
+        let controller = null;
+        this.app.workspace.iterateAllLeaves((leaf) => {
+            if (leaf.view && leaf.view.getViewType && leaf.view.getViewType() === "ttrpg-bestiary-view" && leaf.view.controller) {
+                controller = leaf.view.controller;
+            }
+        });
+        return controller;
+    }
+
     getEntries() {
         return this.index;
+    }
+
+    /**
+     * Returns true if the entry should be EXCLUDED based on the given exclusion rules.
+     * Each rule has {property, value}. If the file's frontmatter[property] matches the value
+     * (case-insensitive), the entry is excluded.
+     */
+    _entryMatchesExclusions(entry, exclusions) {
+        if (!exclusions || !exclusions.length) return false;
+        const fileCache = this.app.metadataCache.getFileCache(entry.file);
+        const fm = fileCache && fileCache.frontmatter;
+        if (!fm) return false;
+        for (const rule of exclusions) {
+            if (!rule.property || !rule.value) continue;
+            const propKey = rule.property.toLowerCase();
+            const propVal = fm[propKey];
+            if (propVal === undefined || propVal === null) continue;
+            const ruleVal = rule.value.toLowerCase();
+            // Handle arrays (e.g. tags: [a, b])
+            if (Array.isArray(propVal)) {
+                if (propVal.some(v => String(v).toLowerCase() === ruleVal)) return true;
+            } else if (String(propVal).toLowerCase() === ruleVal) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Returns index entries filtered by searchExclusions. Used by the search modal/reader. */
+    getSearchEntries() {
+        const exclusions = this.settings.searchExclusions;
+        if (!exclusions || !exclusions.length) return this.index;
+        return this.index.filter(entry => !this._entryMatchesExclusions(entry, exclusions));
     }
 
     getEntryByPath(path) {
@@ -2675,16 +3444,16 @@ class TTRPGVaultSearchPlugin extends Plugin {
         this.settings.bookmarks = Array.from(current); // preserve insertion order
         await this.saveSettings(false);
 
-        for (const modal of this.activeModals) {
-            if (typeof modal.handleBookmarksChanged === "function") {
-                modal.handleBookmarksChanged();
-            }
-        }
+        this.notifyBookmarksChanged();
     }
 
     getBookmarkedEntries() {
         const bookmarked = new Set(this.getBookmarkedPaths());
-        return this.index.filter((entry) => bookmarked.has(entry.path));
+        return this.index.filter((entry) => {
+            if (bookmarked.has(entry.path)) return true;
+            if (entry.collectionKind && bookmarked.has(entry.collectionPath)) return true;
+            return false;
+        });
     }
 
     // Bookmark groups API
@@ -2702,9 +3471,7 @@ class TTRPGVaultSearchPlugin extends Plugin {
         tags[path] = groupId;
         this.settings.bookmarkTags = tags;
         await this.saveSettings(false);
-        for (const modal of this.activeModals) {
-            if (typeof modal.handleBookmarksChanged === "function") modal.handleBookmarksChanged();
-        }
+        this.notifyBookmarksChanged();
     }
 
     async createBookmarkGroup(name) {
@@ -2713,6 +3480,7 @@ class TTRPGVaultSearchPlugin extends Plugin {
         groups.push({ id, name });
         this.settings.bookmarkGroups = groups;
         await this.saveSettings(false);
+        this.notifyBookmarksChanged();
         return id;
     }
 
@@ -2722,9 +3490,7 @@ class TTRPGVaultSearchPlugin extends Plugin {
         if (group) group.name = name;
         this.settings.bookmarkGroups = groups;
         await this.saveSettings(false);
-        for (const modal of this.activeModals) {
-            if (typeof modal.handleBookmarksChanged === "function") modal.handleBookmarksChanged();
-        }
+        this.notifyBookmarksChanged();
     }
 
     async deleteBookmarkGroup(id) {
@@ -2742,9 +3508,7 @@ class TTRPGVaultSearchPlugin extends Plugin {
             this.settings.bookmarkGroupOrder = order;
         }
         await this.saveSettings(false);
-        for (const modal of this.activeModals) {
-            if (typeof modal.handleBookmarksChanged === "function") modal.handleBookmarksChanged();
-        }
+        this.notifyBookmarksChanged();
     }
 
     // Save a custom display order for bookmarks inside a named group
@@ -2821,26 +3585,100 @@ class TTRPGVaultSearchPlugin extends Plugin {
         if (!this.settings.bookmarkGroupOrder) this.settings.bookmarkGroupOrder = {};
         this.settings.bookmarkGroupOrder[groupId] = paths;
         await this.saveSettings(false);
+        this.notifyBookmarksChanged();
     }
 
     // Persist a new ordering of the groups array (drag reorder)
     async setBookmarkGroupsOrder(groups) {
         this.settings.bookmarkGroups = groups;
         await this.saveSettings(false);
-        for (const modal of this.activeModals) {
-            if (typeof modal.handleBookmarksChanged === "function") modal.handleBookmarksChanged();
+        this.notifyBookmarksChanged();
+    }
+
+    getBookmarkGroupForEntry(entry) {
+        const path = this.getBookmarkSortPathForEntry(entry);
+        return this.getBookmarkGroupForPath(path);
+    }
+
+    applyCustomDisplayNames() {
+        const names = this.settings.bookmarkDisplayNames || {};
+        for (const entry of this.index) {
+            const orig = entry.originalDisplayName || entry.displayName;
+            if (!entry.originalDisplayName) entry.originalDisplayName = orig;
+
+            if (names[entry.path]) {
+                entry.displayName = names[entry.path];
+                entry.displayNameLower = names[entry.path].toLowerCase();
+            } else if (entry.collectionPath && names[entry.collectionPath] && entry.collectionPath === entry.path) {
+                entry.displayName = names[entry.collectionPath];
+                entry.displayNameLower = names[entry.collectionPath].toLowerCase();
+            } else {
+                entry.displayName = orig;
+                entry.displayNameLower = orig.toLowerCase();
+            }
         }
     }
 
-    notifyModals() { for (const modal of this.activeModals) { if (typeof modal.refreshFromPlugin === "function") modal.refreshFromPlugin(); else if (typeof modal.handleBookmarksChanged === "function") modal.handleBookmarksChanged(); } }
+    async setBookmarkDisplayName(path, displayName) {
+        if (!this.settings.bookmarkDisplayNames) this.settings.bookmarkDisplayNames = {};
+        if (displayName && displayName.trim()) {
+            this.settings.bookmarkDisplayNames[path] = displayName.trim();
+        } else {
+            delete this.settings.bookmarkDisplayNames[path];
+        }
+        await this.saveSettings(false);
+        this.applyCustomDisplayNames();
+        this.notifyBookmarksChanged();
+    }
+
+    notifyBookmarksChanged() {
+        for (const modal of this.activeModals) {
+            try {
+                if (typeof modal.handleBookmarksChanged === "function") {
+                    modal.handleBookmarksChanged();
+                }
+            } catch (e) {
+                console.error("Error notifying handleBookmarksChanged:", e);
+            }
+        }
+    }
+
+    notifyModals() {
+        for (const modal of this.activeModals) {
+            try {
+                if (typeof modal.refreshFromPlugin === "function") {
+                    modal.refreshFromPlugin();
+                } else if (typeof modal.handleBookmarksChanged === "function") {
+                    modal.handleBookmarksChanged();
+                }
+            } catch (e) {
+                console.error("Error notifying modal:", e);
+            }
+        }
+    }
     refreshDynamicSourceSuffixes() { ACTIVE_BASENAME_SOURCE_KEYS = buildBasenameSourceKeySet(this.app.vault.getMarkdownFiles()); }
     getSourceChipData(sourceKey) { const data = this.settings.sourceChipData || {}; return data[sourceKey] || {}; }
     getSourceDisplayLabel(sourceKey, fallback) { const data = this.getSourceChipData(sourceKey); return String(data.label || fallback || "").trim(); }
     getSourceChipColor(sourceKey) { return this.getSourceChipData(sourceKey).color || ""; }
     async updateSourceChip(sourceKey, currentLabel, nextLabel, nextColor) { if (!sourceKey) return; if (!this.settings.sourceChipData || typeof this.settings.sourceChipData !== "object") this.settings.sourceChipData = {}; this.settings.sourceChipData[sourceKey] = { label: String(nextLabel || currentLabel || "").trim(), color: String(nextColor || "").trim() }; this._cachedSourceOptions = null; await this.saveSettings(false); this.notifyModals(); }
     async resetSourceChip(sourceKey) { if (this.settings.sourceChipData && this.settings.sourceChipData[sourceKey]) { delete this.settings.sourceChipData[sourceKey]; this._cachedSourceOptions = null; await this.saveSettings(false); this.notifyModals(); } }
-    applySourceChipStyle(chipEl, sourceKey) { const color = this.getSourceChipColor(sourceKey); chipEl.classList.add("ttrpg-vs__chip--source"); if (color) chipEl.style.setProperty("--ttrpg-source-color", color); }
-    getFilterPresets() { const byType=(t)=>PRESET_SOURCE_ALIASES_5E.filter(([, , type])=>type===t).map(([,label])=>normalizeKey(label)); const coreAdd=["Xanathar's Guide to Everything","Tasha's Cauldron of Everything","Mordenkainen Presents: Monsters of the Multiverse"]; const built=[{id:"core-2014",name:"Core 2014+",sources:["Player's Handbook","Dungeon Master's Guide","Monster Manual",...coreAdd].map(normalizeKey),types:[]},{id:"core-2024",name:"Core 2024+",sources:["Player's Handbook (2024)","Dungeon Master's Guide (2024)","Monster Manual (2024)",...coreAdd].map(normalizeKey),types:[]},{id:"books",name:"Books",sources:byType("book"),types:[normalizeKey("Book")]},{id:"adventures",name:"Adventures",sources:byType("adventure"),types:[normalizeKey("Adventure")]},{id:"spells",name:"Spells",sources:[],types:[normalizeKey("Spell")]}]; const custom=Array.isArray(this.settings.sourceFilterPresets)?this.settings.sourceFilterPresets:[]; return [...built,...custom].filter(p=>p&&p.name); }
+    applySourceChipStyle(chipEl, sourceKey) {
+        const color = this.getSourceChipColor(sourceKey);
+        chipEl.classList.add("ttrpg-vs__chip--source");
+        if (color) {
+            chipEl.style.setProperty("--ttrpg-source-color", color);
+            chipEl.classList.add("ttrpg-vs__chip--has-custom-color");
+        }
+        const text = chipEl.textContent || "";
+        const len = text.length;
+        if (len > 12) {
+            const size = Math.max(9, Math.min(13, 13 - (len - 12) * 0.2));
+            chipEl.style.fontSize = `${size}px`;
+        } else {
+            chipEl.style.fontSize = "";
+        }
+    }
+    getFilterPresets() { const byType = (t) => PRESET_SOURCE_ALIASES_5E.filter(([, , type]) => type === t).map(([, label]) => normalizeKey(label)); const coreAdd = ["Xanathar's Guide to Everything", "Tasha's Cauldron of Everything", "Mordenkainen Presents: Monsters of the Multiverse"]; const built = [{ id: "core-2014", name: "Core 2014+", sources: ["Player's Handbook", "Dungeon Master's Guide", "Monster Manual", ...coreAdd].map(normalizeKey), types: [] }, { id: "core-2024", name: "Core 2024+", sources: ["Player's Handbook (2024)", "Dungeon Master's Guide (2024)", "Monster Manual (2024)", ...coreAdd].map(normalizeKey), types: [] }, { id: "books", name: "Books", sources: byType("book"), types: [normalizeKey("Book")] }, { id: "adventures", name: "Adventures", sources: byType("adventure"), types: [normalizeKey("Adventure")] }, { id: "spells", name: "Spells", sources: [], types: [normalizeKey("Spell")] }]; const custom = Array.isArray(this.settings.sourceFilterPresets) ? this.settings.sourceFilterPresets : []; return [...built, ...custom].filter(p => p && p.name); }
     async openReaderNativeTab(entries, initialIndex, searchState) {
         try {
             const leaf = this.app.workspace.getLeaf(true);
@@ -3194,7 +4032,7 @@ class TTRPGVaultSearchPlugin extends Plugin {
                 const baseLabel = entry.displayName || entry.fileLabel || entry.path;
                 const key = normalizeKey(baseLabel);
                 const rel = entry.collectionPath ? relativePathWithinFolder(entry.path, entry.collectionPath).replace(/\.md$/i, "") : entry.path;
-                const folderContext = rel.split("/").slice(0, -1).map(formatTitle).filter(Boolean).join(" / " );
+                const folderContext = rel.split("/").slice(0, -1).map(formatTitle).filter(Boolean).join(" / ");
                 const label = counts.get(key) > 1 ? (folderContext ? baseLabel + " — " + folderContext : baseLabel + " — " + rel) : baseLabel;
                 const score = q ? Math.max(scoreEntry(entry, q, false), label.toLowerCase().includes(q.toLowerCase()) ? 80 : -1) : 100;
                 return { entry, label, baseLabel, path: entry.path, score };
@@ -3282,19 +4120,78 @@ class TTRPGVaultSearchPlugin extends Plugin {
 
     async openTTRPGSearchEmbedTarget(specOrQuery) { const spec = this.parseTTRPGSearchEmbedSpec(specOrQuery); const q = String(spec.name || "").trim(); if (!q) { if (typeof this.openSearchPopout === "function") await this.openSearchPopout({ query: "", forceModal: false }); else if (typeof this.openSearchModal === "function") this.openSearchModal({ query: "", forceModal: true }); return; } const entry = this.findBestEntryForTTRPGSearchEmbed(spec); if (!entry) { new Notice("No " + (spec.type || "TTRPG") + " entry found for: " + q); if (typeof this.openSearchPopout === "function") await this.openSearchPopout({ query: q, forceModal: false }); return; } let entries = []; let initialIndex = 0; if (entry.collectionKind && entry.collectionPath) { entries = this.getCollectionEntries(entry.collectionPath); initialIndex = Math.max(0, entries.findIndex((candidate) => candidate.path === entry.path)); } else { entries = this.getReaderEntriesForEntry(entry); initialIndex = Math.max(0, entries.findIndex((candidate) => candidate.path === entry.path)); } const state = { query: q, selectedTypes: spec.type ? [normalizeKey(spec.type)] : [], selectedSources: [], selectedIndex: initialIndex, scrollTop: 0 }; if (typeof this.openReaderNativeTab === "function") { try { await this.openReaderNativeTab(entries, initialIndex, state); return; } catch (error) { console.warn("TTRPG Search button native tab open failed; falling back", error); } } if (typeof this.openReaderPopout === "function") await this.openReaderPopout(entries, initialIndex, state); else new TTRPGReaderModal(this.app, this, entries, initialIndex, state).open(); }
 
-    buildIndex(showNotice) {
+    async buildIndex(showNotice) {
         this.refreshConfiguredFolders();
         this.refreshCustomMaps();
         this.refreshDynamicSourceSuffixes();
 
+        const startTime = performance.now();
+        const files = this.app.vault.getMarkdownFiles();
+        const total = files.length;
+
+        console.log(`[TTRPG Search] Indexing started. Total markdown files in vault: ${total}`);
+        if (showNotice) {
+            new Notice("TTRPG Vault Search: Indexing started...");
+        }
+        if (this.statusBarItem) {
+            this.statusBarItem.setText(`TTRPG Indexing: 0/${total}`);
+        }
+
         const nextMap = new Map();
-        for (const file of this.app.vault.getMarkdownFiles()) {
-            const entry = this.buildEntry(file);
-            if (entry) nextMap.set(file.path, entry);
+        let count = 0;
+        let skippedHidden = 0;
+        let skippedFolder = 0;
+        let skippedFilter = 0;
+        let errors = 0;
+
+        for (const file of files) {
+            if (isHiddenPath(file.path)) {
+                skippedHidden++;
+            } else if (!isWithinConfiguredFolders(file.path, this.configuredFolders)) {
+                skippedFolder++;
+            } else {
+                try {
+                    const entry = await this.buildEntry(file);
+                    if (entry) {
+                        nextMap.set(file.path, entry);
+                    } else {
+                        skippedFilter++;
+                    }
+                } catch (e) {
+                    errors++;
+                    console.error("Failed to build index entry for file:", file.path, e);
+                }
+            }
+            count++;
+            const isMilestone = count % Math.max(1, Math.round(total / 5)) === 0 || count === total;
+            if (isMilestone) {
+                console.log(`[TTRPG Search] Indexing progress: ${count}/${total} (${Math.round((count / total) * 100)}%)`);
+            }
+            if (count % 100 === 0 || count === total) {
+                if (this.statusBarItem) {
+                    this.statusBarItem.setText(`TTRPG Indexing: ${count}/${total} (${Math.round((count / total) * 100)}%)`);
+                }
+            }
         }
 
         this.entryMap = nextMap;
         this.publishIndex();
+
+        const duration = performance.now() - startTime;
+        console.log(`[TTRPG Search] Indexing finished in ${duration.toFixed(2)}ms.
+- Total files checked: ${total}
+- Successfully indexed: ${this.index.length}
+- Skipped (hidden path): ${skippedHidden}
+- Skipped (not in configured folders): ${skippedFolder}
+- Skipped (no type/source/collection metadata): ${skippedFilter}
+- Errors encountered: ${errors}`);
+
+        if (this.statusBarItem) {
+            this.statusBarItem.setText("TTRPG Indexing: Done");
+            setTimeout(() => {
+                this.statusBarItem.setText("");
+            }, 3000);
+        }
 
         if (showNotice) {
             new Notice(`TTRPG Vault Search indexed ${this.index.length} files.`);
@@ -3314,12 +4211,16 @@ class TTRPGVaultSearchPlugin extends Plugin {
             );
         });
 
+        this.applyCustomDisplayNames();
+
         // Invalidate all cached option lists
-        this._cachedTypeOptions     = null;
-        this._cachedSourceOptions   = null;
-        this._cachedSpellLevels     = null;
-        this._cachedSpellSchools    = null;
-        this._cachedSpellClasses    = null;
+        this._bestiaryEntriesCache = null;
+        this._spellEntriesCache = null;
+        this._cachedTypeOptions = null;
+        this._cachedSourceOptions = null;
+        this._cachedSpellLevels = null;
+        this._cachedSpellSchools = null;
+        this._cachedSpellClasses = null;
 
         for (const modal of this.activeModals) {
             if (typeof modal.refreshFromPlugin === "function") modal.refreshFromPlugin();
@@ -3351,7 +4252,7 @@ class TTRPGVaultSearchPlugin extends Plugin {
         this.flushPendingUpdates();
     }
 
-    applyPendingUpdates() {
+    async applyPendingUpdates() {
         if (!this.pendingPaths.size) return;
 
         this.refreshConfiguredFolders();
@@ -3367,7 +4268,12 @@ class TTRPGVaultSearchPlugin extends Plugin {
             const file = this.app.vault.getAbstractFileByPath(path);
 
             if (file instanceof TFile && file.extension === "md") {
-                const nextEntry = this.buildEntry(file);
+                let nextEntry = null;
+                try {
+                    nextEntry = await this.buildEntry(file);
+                } catch (e) {
+                    console.error("Failed to update index entry for file:", file.path, e);
+                }
                 const previousEntry = this.entryMap.get(file.path);
 
                 if (nextEntry) {
@@ -3390,9 +4296,16 @@ class TTRPGVaultSearchPlugin extends Plugin {
         if (changed) this.publishIndex();
     }
 
-    buildEntry(file) {
+    async buildEntry(file) {
         if (isHiddenPath(file.path)) return null;
         if (!isWithinConfiguredFolders(file.path, this.configuredFolders)) return null;
+
+        let content = "";
+        try {
+            content = await this.app.vault.cachedRead(file);
+        } catch (e) {
+            console.error("Failed to read file content for indexing:", file.path, e);
+        }
 
         const fileCache = this.app.metadataCache.getFileCache(file);
         const frontmatter = indexFrontmatter(fileCache && fileCache.frontmatter);
@@ -3452,15 +4365,17 @@ class TTRPGVaultSearchPlugin extends Plugin {
         const fileLabel = parsed.name || displayName;
         const aliases = extractAliases(frontmatter);
 
+        // Shared tag collection for spell and monster/bestiary metadata.
+        // Keep this outside the spell-only block so monsters can safely use it too.
+        const cacheTags = fileCache?.tags ? fileCache.tags.map((tc) => tc.tag.replace(/^#/, "")) : [];
+        const fmTagsRaw = Array.isArray(frontmatter?.tags) ? frontmatter.tags : [];
+        const fmTags = fmTagsRaw.map((t) => String(t).replace(/^#/, "")).filter(Boolean);
+        const allTags = [...new Set([...cacheTags, ...fmTags])];
+
         // Spell-specific metadata (only populated when type is Spell)
         let spellMeta = null;
         if (typeKey === "spell") {
-            // Collect all tags: from the metadata cache (includes inline) + frontmatter array
-            const cacheTags = fileCache?.tags ? fileCache.tags.map((tc) => tc.tag.replace(/^#/, "")) : [];
-            const fmTagsRaw = Array.isArray(frontmatter?.tags) ? frontmatter.tags : [];
-            const fmTags = fmTagsRaw.map((t) => String(t).replace(/^#/, "")).filter(Boolean);
-            const allTags = [...new Set([...cacheTags, ...fmTags])];
-
+            // Reuse shared tag collection from buildEntry scope.
             // Prefix for ttrpg-cli tag hierarchy, e.g. "ttrpg-cli/spell/school/Evocation"
             const tagBase = ((this.settings.spellTagPrefix || "ttrpg-cli") + "/spell/").toLowerCase();
 
@@ -3492,30 +4407,44 @@ class TTRPGVaultSearchPlugin extends Plugin {
                 allTags.some((t) => t.toLowerCase() === tagBase + subSuffix.toLowerCase().replace(/\/$/, ""));
 
             // Extract from tags first, fall back to frontmatter
-            const levelFromTag  = getTagVal("level/");
+            const levelFromTag = getTagVal("level/");
             const schoolFromTag = getTagVal("school/");
             const classesFromTags = getTagVals("class/").map((c) => formatTitle(c)).filter(Boolean);
 
-            const levelRaw  = levelFromTag  ?? getFrontmatterValue(frontmatter, "level", "spell_level", "spelllevel");
+            const levelRaw = levelFromTag ?? getFrontmatterValue(frontmatter, "level", "spell_level", "spelllevel");
             const schoolRaw = schoolFromTag ?? readString(getFrontmatterValue(frontmatter, "school"));
             const classesFromFM = readStringArray(getFrontmatterValue(frontmatter, "class", "classes", "for_class", "casting_class"))
                 .map((c) => formatTitle(c)).filter(Boolean);
 
-            const ritualRaw        = getFrontmatterValue(frontmatter, "ritual", "israitual", "is_ritual");
+            const ritualRaw = getFrontmatterValue(frontmatter, "ritual", "israitual", "is_ritual");
             const concentrationRaw = getFrontmatterValue(frontmatter, "concentration", "isconcentration", "is_concentration", "duration", "time", "traits", "properties");
             const toBool = (v) => v === true || String(v || "").toLowerCase() === "true" || String(v || "").toLowerCase() === "yes";
 
-            const spellLevel   = parseSpellLevel(levelRaw);
-            const spellSchool  = schoolRaw ? formatTitle(String(schoolRaw)) : null;
+            const spellLevel = parseSpellLevel(levelRaw);
+            const spellSchool = schoolRaw ? formatTitle(String(schoolRaw)) : null;
             const spellClasses = classesFromTags.length ? classesFromTags : classesFromFM;
 
             spellMeta = {
-                level:         spellLevel,
-                school:        spellSchool,
-                classes:       spellClasses,
-                ritual:        hasTag("ritual") || hasTag("tag/ritual") || toBool(ritualRaw),
+                level: spellLevel,
+                school: spellSchool,
+                classes: spellClasses,
+                ritual: hasTag("ritual") || hasTag("tag/ritual") || toBool(ritualRaw),
                 concentration: hasTag("concentration") || hasTag("tag/concentration") || hasTag("trait/concentration") || tagContains(fileCache, frontmatter, "concentration") || toBool(concentrationRaw) || valueContainsText(concentrationRaw, "concentration"),
             };
+        }
+
+        const bestiaryPathHint = /(^|\/)(bestiary|bestiaries|monster|monsters|creature|creatures)(\/|$)/i.test(normalizePath(file.path || ""));
+        const bestiaryFrontmatterHint = !!getFrontmatterValue(frontmatter, "cr", "challenge", "challenge_rating", "challengeRating", "bestiarytype", "bestiary_type", "monster_type", "monstertype", "creature_type");
+        const bestiaryTagHint = (Array.isArray(allTags) ? allTags : []).some((tag) => /(^|\/)(bestiary|monster|creature|npc)(\/|$)/i.test(String(tag || "")));
+        const entryLooksLikeMonster = normalizeKey(typeLabel) === "monster" || bestiaryPathHint || bestiaryFrontmatterHint || bestiaryTagHint;
+        let monsterMeta = null;
+        if (entryLooksLikeMonster) {
+            try {
+                const statblockData = parseStatblockCodeBlock(content);
+                monsterMeta = extractMonsterMeta(frontmatter, Array.isArray(allTags) ? allTags : [], file, typeLabel, displayName, statblockData);
+            } catch (err) {
+                console.error("Failed to parse monster metadata for indexing:", file.path, err);
+            }
         }
 
         const entry = {
@@ -3525,6 +4454,7 @@ class TTRPGVaultSearchPlugin extends Plugin {
 
             displayName,
             displayNameLower: displayName.toLowerCase(),
+            originalDisplayName: displayName,
 
             fileLabel,
             fileLabelLower: fileLabel.toLowerCase(),
@@ -3544,6 +4474,10 @@ class TTRPGVaultSearchPlugin extends Plugin {
             isOverview,
 
             spellMeta,
+            monsterMeta,
+
+            fileContent: content,
+            fileContentLower: content.toLowerCase(),
 
             searchBlob: "",
         };
@@ -3554,6 +4488,7 @@ class TTRPGVaultSearchPlugin extends Plugin {
 
     async loadSettings() {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        this.applyCustomDisplayNames();
     }
 
     async saveSettings(rebuild = true) {
@@ -3568,10 +4503,126 @@ class TTRPGVaultSearchPlugin extends Plugin {
 
 class SourceChipEditModal extends Modal {
     constructor(app, plugin, sourceKey, currentLabel) { super(app); this.plugin = plugin; this.sourceKey = sourceKey; this.currentLabel = currentLabel; }
-    onOpen() { this.modalEl.classList.add("ttrpg-vs-source-modal"); this.titleEl.setText("Edit Source Chip"); this.contentEl.empty(); const data=this.plugin.getSourceChipData(this.sourceKey); const wrap=this.contentEl.createDiv({cls:"ttrpg-vs-source"}); const labelRow=wrap.createDiv({cls:"ttrpg-vs-source-edit__row"}); labelRow.createDiv({cls:"ttrpg-vs__label", text:"Chip text (can duplicate another source without merging filters)"}); const labelInput=labelRow.createEl("input",{cls:"ttrpg-vs-source-edit__input"}); labelInput.type="text"; labelInput.value=data.label||this.currentLabel||""; const colorRow=wrap.createDiv({cls:"ttrpg-vs-source-edit__row"}); colorRow.createDiv({cls:"ttrpg-vs__label", text:"Chip colour"}); const colorInput=colorRow.createEl("input",{cls:"ttrpg-vs-source-edit__input"}); colorInput.type="color"; colorInput.value=/^#[0-9a-f]{6}$/i.test(data.color||"")?data.color:"#7c3aed"; const buttons=wrap.createDiv({cls:"ttrpg-vs__button-row"}); const saveBtn=buttons.createEl("button",{cls:"ttrpg-vs__toolbutton", text:"Save"}); saveBtn.type="button"; saveBtn.addEventListener("click", async()=>{ await this.plugin.updateSourceChip(this.sourceKey,this.currentLabel,labelInput.value,colorInput.value); this.close(); }); const resetBtn=buttons.createEl("button",{cls:"ttrpg-vs__toolbutton", text:"Reset"}); resetBtn.type="button"; resetBtn.addEventListener("click", async()=>{ await this.plugin.resetSourceChip(this.sourceKey); this.close(); }); window.setTimeout(()=>labelInput.focus(),0); }
+    onOpen() { this.modalEl.classList.add("ttrpg-vs-source-modal"); this.titleEl.setText("Edit Source Chip"); this.contentEl.empty(); const data = this.plugin.getSourceChipData(this.sourceKey); const wrap = this.contentEl.createDiv({ cls: "ttrpg-vs-source" }); const labelRow = wrap.createDiv({ cls: "ttrpg-vs-source-edit__row" }); labelRow.createDiv({ cls: "ttrpg-vs__label", text: "Chip text (can duplicate another source without merging filters)" }); const labelInput = labelRow.createEl("input", { cls: "ttrpg-vs-source-edit__input" }); labelInput.type = "text"; labelInput.value = data.label || this.currentLabel || ""; const colorRow = wrap.createDiv({ cls: "ttrpg-vs-source-edit__row" }); colorRow.createDiv({ cls: "ttrpg-vs__label", text: "Chip colour" }); const colorInput = colorRow.createEl("input", { cls: "ttrpg-vs-source-edit__input" }); colorInput.type = "color"; colorInput.value = /^#[0-9a-f]{6}$/i.test(data.color || "") ? data.color : "#7c3aed"; const buttons = wrap.createDiv({ cls: "ttrpg-vs__button-row" }); const saveBtn = buttons.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Save" }); saveBtn.type = "button"; saveBtn.addEventListener("click", async () => { await this.plugin.updateSourceChip(this.sourceKey, this.currentLabel, labelInput.value, colorInput.value); this.close(); }); const resetBtn = buttons.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Reset" }); resetBtn.type = "button"; resetBtn.addEventListener("click", async () => { await this.plugin.resetSourceChip(this.sourceKey); this.close(); }); window.setTimeout(() => labelInput.focus(), 0); }
 }
 
+class ImageSelectorModal extends Modal {
+    constructor(app, plugin, entry, onSave) {
+        super(app);
+        this.plugin = plugin;
+        this.entry = entry;
+        this.onSave = onSave;
+    }
+    onOpen() {
+        this.modalEl.classList.add("ttrpg-vs-source-modal");
+        this.titleEl.setText("Set Custom Token Image");
+        const contentEl = this.contentEl;
+        contentEl.empty();
 
+        const wrap = contentEl.createDiv({ cls: "ttrpg-vs-source" });
+
+        const info = wrap.createDiv();
+        info.style.marginBottom = "12px";
+        info.style.color = "var(--text-accent)";
+        info.style.fontWeight = "bold";
+        info.style.fontSize = "13px";
+        info.setText("Optimal image size is 256x256 pixels.");
+
+        const vaultRow = wrap.createDiv({ cls: "ttrpg-vs-source-edit__row" });
+        vaultRow.createDiv({ cls: "ttrpg-vs__label", text: "Vault Image Path" });
+        const vaultInput = vaultRow.createEl("input", { cls: "ttrpg-vs-source-edit__input" });
+        vaultInput.type = "text";
+        vaultInput.placeholder = "e.g. attachments/goblin_token.png";
+
+        const key = this.entry.collectionPath || this.entry.path;
+        const currentCustom = this.plugin.settings.customMonsterImages?.[key] || this.entry.monsterMeta?.image || "";
+        vaultInput.value = currentCustom;
+
+        const uploadRow = wrap.createDiv({ cls: "ttrpg-vs-source-edit__row" });
+        uploadRow.createDiv({ cls: "ttrpg-vs__label", text: "Or Upload from Desktop (Copies file into vault)" });
+        const fileInput = uploadRow.createEl("input");
+        fileInput.type = "file";
+        fileInput.accept = "image/*";
+        fileInput.style.width = "100%";
+
+        const buttons = wrap.createDiv({ cls: "ttrpg-vs__button-row" });
+
+        const saveBtn = buttons.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Save" });
+        saveBtn.type = "button";
+        saveBtn.addEventListener("click", async () => {
+            const file = fileInput.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = async () => {
+                    const arrayBuffer = reader.result;
+                    let folderPath = "";
+                    if (this.entry.path && this.entry.path.includes("/")) {
+                        folderPath = this.entry.path.substring(0, this.entry.path.lastIndexOf("/"));
+                    }
+                    const destPath = (folderPath ? folderPath + "/" : "") + file.name;
+                    try {
+                        let existing = this.app.vault.getAbstractFileByPath(destPath);
+                        if (existing) {
+                            await this.app.vault.modifyBinary(existing, arrayBuffer);
+                        } else {
+                            await this.app.vault.createBinary(destPath, arrayBuffer);
+                        }
+                        await this.saveImage(destPath);
+                        new Notice(`Copied desktop file to vault: ${destPath}`);
+                        this.close();
+                    } catch (err) {
+                        new Notice("Failed to copy file: " + err.message);
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            } else {
+                const pathVal = vaultInput.value.trim();
+                if (pathVal) {
+                    await this.saveImage(pathVal);
+                    this.close();
+                } else {
+                    new Notice("Please enter a vault path or select a desktop file.");
+                }
+            }
+        });
+
+        const resetBtn = buttons.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Reset" });
+        resetBtn.type = "button";
+        resetBtn.addEventListener("click", async () => {
+            await this.saveImage("");
+            this.close();
+        });
+    }
+
+    async saveImage(imgPath) {
+        const key = this.entry.collectionPath || this.entry.path;
+        if (!this.plugin.settings.customMonsterImages) {
+            this.plugin.settings.customMonsterImages = {};
+        }
+        if (imgPath) {
+            this.plugin.settings.customMonsterImages[key] = imgPath;
+        } else {
+            delete this.plugin.settings.customMonsterImages[key];
+        }
+        await this.plugin.saveSettings(false);
+
+        const file = this.app.vault.getAbstractFileByPath(this.entry.path);
+        if (file && file instanceof TFile) {
+            try {
+                await this.app.fileManager.processFrontMatter(file, (fm) => {
+                    if (imgPath) {
+                        fm["image"] = imgPath;
+                    } else {
+                        delete fm["image"];
+                    }
+                });
+            } catch (e) {
+                console.error("Failed to update frontmatter image:", e);
+            }
+        }
+        if (this.onSave) this.onSave();
+    }
+}
 
 class TTRPGConfirmModal extends Modal {
     constructor(app, title, message, confirmText, cancelText, onResult) {
@@ -3580,7 +4631,7 @@ class TTRPGConfirmModal extends Modal {
         this.message = message || "";
         this.confirmText = confirmText || "Confirm";
         this.cancelText = cancelText || "Cancel";
-        this.onResult = typeof onResult === "function" ? onResult : (() => {});
+        this.onResult = typeof onResult === "function" ? onResult : (() => { });
         this.resolved = false;
     }
     resolve(value) {
@@ -3682,6 +4733,7 @@ class TTRPGSearchModal extends Modal {
         super(app);
         this.plugin = plugin;
         this.initialState = initialState;
+        this.hoverPopover = null;
 
         this.query = "";
         this.selectedTypes = new Set();
@@ -3692,6 +4744,7 @@ class TTRPGSearchModal extends Modal {
         this.virtualRenderQueued = false;
         this.showBookmarksOnly = false;
         this.selectedBookmarkGroup = null;      // null = all groups
+        this._engine = null;
 
         this.refreshResultsDebounced = debounce(() => this.refreshResults(true), 25, false);
     }
@@ -3717,6 +4770,7 @@ class TTRPGSearchModal extends Modal {
             this.selectedIndex = 0;
             this.refreshResultsDebounced();
         });
+        this.inputEl.addEventListener("blur", () => this.saveSearchState());
 
         this.inputEl.addEventListener("keydown", (event) => {
             if (!this.visibleEntries.length) return;
@@ -3771,6 +4825,7 @@ class TTRPGSearchModal extends Modal {
                     this.updateTypeButton();
                     this.selectedIndex = 0;
                     this.refreshResults(true);
+                    this.saveSearchState();
                 }
             );
             picker.open();
@@ -3787,13 +4842,15 @@ class TTRPGSearchModal extends Modal {
 
             const picker = new SourcePickerModal(
                 this.app,
-                this.plugin.getSourceOptions(),
+                this.plugin,
+                () => this.plugin.getSourceOptions(),
                 new Set(this.selectedSources),
                 (selectedKeys) => {
                     this.selectedSources = selectedKeys;
                     this.updateSourceButton();
                     this.selectedIndex = 0;
                     this.refreshResults(true);
+                    this.saveSearchState();
                 }
             );
             picker.open();
@@ -3818,6 +4875,7 @@ class TTRPGSearchModal extends Modal {
         this.sortSelectEl.addEventListener("change", async () => {
             this.plugin.settings.sortMode = this.sortSelectEl.value;
             await this.plugin.saveSettings(false);
+            this.saveSearchState();
             this.refreshResults(false);
         });
 
@@ -3834,6 +4892,7 @@ class TTRPGSearchModal extends Modal {
             this.updateBookmarksButton();
             this.renderBookmarkGroupTabs();
             this.refreshResults(true);
+            this.saveSearchState();
         });
 
         this.manageBookmarksEl = buttonRowEl.createEl("button", {
@@ -3856,13 +4915,26 @@ class TTRPGSearchModal extends Modal {
             this.updateSourceButton();
             this.selectedIndex = 0;
             this.refreshResults(true);
+            this.saveSearchState();
         });
 
         this.presetSelectEl = buttonRowEl.createEl("select", { cls: "ttrpg-vs__select" });
         this.presetSelectEl.style.width = "auto";
         this.presetSelectEl.appendChild(Object.assign(document.createElement("option"), { value: "", textContent: "Preset…" }));
-        for (const preset of this.plugin.getFilterPresets()) { const opt=document.createElement("option"); opt.value=preset.id; opt.textContent=preset.name; this.presetSelectEl.appendChild(opt); }
-        this.presetSelectEl.addEventListener("change", () => { const preset=this.plugin.getFilterPresets().find((p)=>p.id===this.presetSelectEl.value); if(!preset) return; const validSources=new Set(this.plugin.getSourceOptions().map((o)=>o.key)); const validTypes=new Set(this.plugin.getTypeOptions().map((o)=>o.key)); this.selectedSources=new Set((preset.sources||[]).map(normalizeKey).filter((k)=>validSources.has(k))); this.selectedTypes=new Set((preset.types||[]).map(normalizeKey).filter((k)=>validTypes.has(k))); this.updateSourceButton(); this.updateTypeButton(); this.selectedIndex=0; this.refreshResults(true); });
+        for (const preset of this.plugin.getFilterPresets()) { const opt = document.createElement("option"); opt.value = preset.id; opt.textContent = preset.name; this.presetSelectEl.appendChild(opt); }
+        this.presetSelectEl.addEventListener("change", () => {
+            const preset = this.plugin.getFilterPresets().find((p) => p.id === this.presetSelectEl.value);
+            if (!preset) return;
+            const validSources = new Set(this.plugin.getSourceOptions().map((o) => o.key));
+            const validTypes = new Set(this.plugin.getTypeOptions().map((o) => o.key));
+            this.selectedSources = new Set((preset.sources || []).map(normalizeKey).filter((k) => validSources.has(k)));
+            this.selectedTypes = new Set((preset.types || []).map(normalizeKey).filter((k) => validTypes.has(k)));
+            this.updateSourceButton();
+            this.updateTypeButton();
+            this.selectedIndex = 0;
+            this.refreshResults(true);
+            this.saveSearchState();
+        });
 
         this.popoutSearchEl = buttonRowEl.createEl("button", {
             cls: "ttrpg-vs__toolbutton",
@@ -3904,15 +4976,19 @@ class TTRPGSearchModal extends Modal {
     }
 
     onClose() {
-        if (this._viewportRO) { this._viewportRO.disconnect(); this._viewportRO = null; }
-        // Persist state. _cachedSearchState is always available within the same session;
-        // lastSearchState is also written to disk (async, best-effort for cross-session restore).
-        if (this.plugin.settings.saveLastSearch && this.viewportEl) {
-            const snap = this.getStateSnapshot();
-            this.plugin._cachedSearchState = snap;       // instant in-memory cache
-            this.plugin.settings.lastSearchState = snap; // persisted to disk
-            void this.plugin.saveSettings(false);
+        if (this._engine) {
+            this._engine.destroy();
         }
+        if (this._viewportRO) { this._viewportRO.disconnect(); this._viewportRO = null; }
+        if (this.plugin.settings.saveLastSearch) {
+            const snap = this._engine ? this._engine.searchState : (this.viewportEl ? this.getStateSnapshot() : null);
+            if (snap) {
+                this.plugin._cachedSearchState = snap;
+                this.plugin.settings.lastSearchState = snap;
+                void this.plugin.saveSettings(false);
+            }
+        }
+        this._engine = null;
         this.plugin.unregisterModal(this);
         this.renderedItems.clear();
         this.contentEl.empty();
@@ -3968,7 +5044,20 @@ class TTRPGSearchModal extends Modal {
         };
     }
 
+    saveSearchState() {
+        if (this.plugin.settings.saveLastSearch) {
+            const snap = this.getStateSnapshot();
+            this.plugin._cachedSearchState = snap;
+            this.plugin.settings.lastSearchState = snap;
+            void this.plugin.saveSettings(false);
+        }
+    }
+
     refreshFromPlugin() {
+        if (this._engine) {
+            this._engine.refreshFromPlugin();
+            return;
+        }
         this.refreshFilters();
         this.updateSourceButton();
         this.updateBookmarksButton();
@@ -3977,6 +5066,10 @@ class TTRPGSearchModal extends Modal {
     }
 
     handleBookmarksChanged() {
+        if (this._engine) {
+            this._engine.handleBookmarksChanged();
+            return;
+        }
         this.updateBookmarksButton();
         this.renderBookmarkGroupTabs();
         this.refreshResults(false);
@@ -4072,6 +5165,7 @@ class TTRPGSearchModal extends Modal {
             this.selectedBookmarkGroup = null;
             this.renderBookmarkGroupTabs();
             this.refreshResults(true);
+            this.saveSearchState();
         });
         this.groupTabsEl.appendChild(allTab);
 
@@ -4087,6 +5181,7 @@ class TTRPGSearchModal extends Modal {
                 this.selectedBookmarkGroup = "ungrouped";
                 this.renderBookmarkGroupTabs();
                 this.refreshResults(true);
+                this.saveSearchState();
             });
             this.groupTabsEl.appendChild(ungroupedTab);
         }
@@ -4100,6 +5195,7 @@ class TTRPGSearchModal extends Modal {
                 this.selectedBookmarkGroup = group.id;
                 this.renderBookmarkGroupTabs();
                 this.refreshResults(true);
+                this.saveSearchState();
             });
             this.groupTabsEl.appendChild(tab);
         }
@@ -4107,7 +5203,7 @@ class TTRPGSearchModal extends Modal {
 
     refreshResults(resetScroll) {
         const titleOnly = !!this.plugin.settings.searchTitleOnly;
-        let entries = this.plugin.getEntries();
+        let entries = this.plugin.getSearchEntries();
 
         if (this.showBookmarksOnly) {
             const bookmarked = new Set(this.plugin.getBookmarkedPaths());
@@ -4120,15 +5216,7 @@ class TTRPGSearchModal extends Modal {
             // Bookmark group filter
             if (this.selectedBookmarkGroup !== null) {
                 entries = entries.filter((entry) => {
-                    // A chapter that is individually bookmarked uses its OWN path for
-                    // group lookup so it can be placed in a different group than the adventure.
-                    const key =
-                        entry.collectionKind &&
-                        bookmarked.has(entry.collectionPath) &&
-                        !bookmarked.has(entry.path)
-                            ? entry.collectionPath
-                            : entry.path;
-                    const groupId = this.plugin.getBookmarkGroupForPath(key);
+                    const groupId = this.plugin.getBookmarkGroupForEntry(entry);
                     if (this.selectedBookmarkGroup === "ungrouped") return !groupId;
                     return groupId === this.selectedBookmarkGroup;
                 });
@@ -4191,7 +5279,7 @@ class TTRPGSearchModal extends Modal {
 
             const fileBookmarked = bookmarkedPaths.has(entry.path);
             const collBookmarked = bookmarkedPaths.has(entry.collectionPath);
-            const isRep          = entry.path === collRepPath.get(entry.collectionPath);
+            const isRep = entry.path === collRepPath.get(entry.collectionPath);
 
             if (this.showBookmarksOnly) {
                 // Show adventure representative once when the whole adventure is bookmarked
@@ -4302,6 +5390,22 @@ class TTRPGSearchModal extends Modal {
         itemEl.addEventListener("click", () => {
             void this.openEntry(entry);
         });
+
+        // Ctrl/Cmd-hover: trigger Obsidian native page preview
+        const _handleModalHover = (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                this.app.workspace.trigger("hover-link", {
+                    event: e,
+                    source: "search",
+                    hoverParent: this,
+                    targetEl: itemEl,
+                    linktext: entry.path,
+                    sourcePath: ""
+                });
+            }
+        };
+        itemEl.addEventListener("mouseover", _handleModalHover);
+        itemEl.addEventListener("mousemove", _handleModalHover);
 
         const topEl = document.createElement("div");
         topEl.className = "ttrpg-vs__top";
@@ -4423,6 +5527,13 @@ class TTRPGSearchModal extends Modal {
             event.preventDefault();
             event.stopPropagation();
             await this.plugin.toggleBookmark(bookmarkKey);
+            starEl.classList.toggle("is-active", this.plugin.isBookmarked(bookmarkKey));
+            starEl.textContent = this.plugin.isBookmarked(bookmarkKey) ? "★" : "☆";
+            starEl.title = this.plugin.isBookmarked(bookmarkKey) ? "Remove bookmark" : "Add bookmark";
+            this.updateBookmarksButton();
+            if (this.showBookmarksOnly) {
+                this.refreshResults(false);
+            }
         });
         rightEl.appendChild(starEl);
 
@@ -4472,6 +5583,7 @@ class TTRPGSearchModal extends Modal {
     }
 
     async openEntry(entry) {
+        await new Promise(resolve => setTimeout(resolve, 50));
         let entries, initialIndex;
 
         const isCollRep = !!(
@@ -4494,30 +5606,2252 @@ class TTRPGSearchModal extends Modal {
 
         const snap = this.getStateSnapshot();
         if (this.plugin.settings.openReaderInPopoutByDefault) { this.close(); await this.plugin.openReaderPopout(entries, initialIndex, snap); return; }
-        const reader = new TTRPGReaderModal(this.app, this.plugin, entries, initialIndex, snap);
-        this.close();
-        reader.open();
+
+        if (this._viewportRO) {
+            this._viewportRO.disconnect();
+            this._viewportRO = null;
+        }
+        this.renderedItems.clear();
+        this.contentEl.empty();
+        this.contentEl.classList.remove("ttrpg-vs");
+        this.contentEl.classList.add("ttrpg-reader");
+        this.modalEl.classList.remove("ttrpg-vs-modal");
+        this.modalEl.classList.add("ttrpg-reader-modal");
+
+        this._engine = new ReaderEngine(this.app, this.plugin, {
+            setTitle: (text) => this.titleEl.setText(text),
+            goBack: (state) => {
+                if (this._engine) {
+                    this._engine.destroy();
+                    this._engine = null;
+                }
+                this.initialState = state;
+                this.contentEl.empty();
+                this.contentEl.classList.remove("ttrpg-reader");
+                this.contentEl.classList.add("ttrpg-vs");
+                this.modalEl.classList.remove("ttrpg-reader-modal");
+                this.modalEl.classList.add("ttrpg-vs-modal");
+                this.onOpen();
+            },
+            closeReader: () => this.close(),
+            isPopout: false,
+        });
+        this._engine.build(this.contentEl, entries, initialIndex, snap);
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TTRPGSpellbookModal – spell-only view with level / school / class filters
-// ─────────────────────────────────────────────────────────────────────────────
-class TTRPGSpellbookModal extends Modal {
+function stopSelectPropagation(el) {
+    if (!el) return;
+    el.addEventListener("mousedown", (e) => e.stopPropagation());
+    el.addEventListener("click", (e) => e.stopPropagation());
+}
+
+class TTRPGBestiaryController {
+    constructor(app, plugin, options) {
+        this.app = app;
+        this.plugin = plugin;
+        this.containerEl = options.containerEl;
+        this.isPopout = options.isPopout || false;
+        this.onClose = options.onClose;
+        this.parentComponent = options.parentComponent || plugin;
+
+        this.nameQuery = "";
+        this.environmentQuery = "";
+        this.crQuery = "";
+        this.acQuery = "";
+        this.typeQuery = "";
+        this.sizeQuery = "";
+        this.alignmentQuery = "";
+        this.selectedCRs = new Set();
+        this.selectedSources = new Set();
+        this.selectedTypes = new Set();
+        this.selectedAlignments = new Set();
+        this.showFavoritesOnly = false;
+        this.selectedBookmarkGroup = "";
+        this.activeTab = "CR";
+        this.sortMode = "name";
+        this.sortDirection = "asc";
+        this.viewMode = "cards";
+        this.filterWidth = this.plugin.settings.bestiaryFilterWidth || 280;
+        this.encounterWidth = this.plugin.settings.bestiaryEncounterWidth || 340;
+        this.encounterMinimised = this.plugin.settings.bestiaryEncounterMinimised || false;
+        this.encounterName = this.plugin.settings.bestiaryEncounterName || "New Encounter";
+        this.encounter = Array.isArray(this.plugin.settings.bestiaryEncounter) ? JSON.parse(JSON.stringify(this.plugin.settings.bestiaryEncounter)) : [];
+        this.partyRows = Array.isArray(this.plugin.settings.bestiaryPartyRows) ? JSON.parse(JSON.stringify(this.plugin.settings.bestiaryPartyRows)) : [{ level: 5, count: 4 }];
+        this.xpMathMode = this.plugin.settings.bestiaryXpMathMode || "kpfc";
+        this.includePartySizeAdjustment = this.plugin.settings.bestiaryIncludePartySizeAdjustment !== false;
+        this.fleeMortalsDifficulty = this.plugin.settings.bestiaryFleeMortalsDifficulty || "standard";
+        this.fleeMortalsDayBudget = this.plugin.settings.bestiaryFleeMortalsDayBudget || 8;
+        this.fleeMortalsSpent = this.plugin.settings.bestiaryFleeMortalsSpent || 0;
+        this.selectedPartyName = this.plugin.settings.bestiarySelectedPartyName || "custom";
+        this._monsterReaderLeaf = null;
+
+        this._sourcesCache = null;
+        this._typesCache = null;
+        this._alignmentsCache = null;
+        this._monsterImageCache = new Map();
+
+        if (options.initialState) {
+            this.loadState(options.initialState);
+        }
+
+        this.debouncedMainRender = debounce(() => this.renderMainContent(), 150, false);
+    }
+
+    loadState(state) {
+        if (!state) return;
+        if (state.nameQuery !== undefined) this.nameQuery = state.nameQuery;
+        if (state.environmentQuery !== undefined) this.environmentQuery = state.environmentQuery;
+        if (state.crQuery !== undefined) this.crQuery = state.crQuery;
+        if (state.acQuery !== undefined) this.acQuery = state.acQuery;
+        if (state.typeQuery !== undefined) this.typeQuery = state.typeQuery;
+        if (state.sizeQuery !== undefined) this.sizeQuery = state.sizeQuery;
+        if (state.alignmentQuery !== undefined) this.alignmentQuery = state.alignmentQuery;
+        if (state.selectedCRs) this.selectedCRs = new Set(state.selectedCRs);
+        if (state.selectedSources) this.selectedSources = new Set(state.selectedSources);
+        if (state.selectedTypes) this.selectedTypes = new Set(state.selectedTypes);
+        if (state.selectedAlignments) this.selectedAlignments = new Set(state.selectedAlignments);
+        if (state.showFavoritesOnly !== undefined) this.showFavoritesOnly = state.showFavoritesOnly;
+        if (state.selectedBookmarkGroup !== undefined) this.selectedBookmarkGroup = state.selectedBookmarkGroup;
+        if (state.activeTab !== undefined) this.activeTab = state.activeTab;
+        if (state.sortMode !== undefined) this.sortMode = state.sortMode;
+        if (state.sortDirection !== undefined) this.sortDirection = state.sortDirection;
+        if (state.viewMode !== undefined) this.viewMode = state.viewMode;
+        if (state.encounterName !== undefined) this.encounterName = state.encounterName;
+        if (state.encounter) this.encounter = JSON.parse(JSON.stringify(state.encounter));
+        if (state.partyRows) this.partyRows = JSON.parse(JSON.stringify(state.partyRows));
+        if (state.xpMathMode !== undefined) this.xpMathMode = state.xpMathMode;
+        if (state.includePartySizeAdjustment !== undefined) this.includePartySizeAdjustment = state.includePartySizeAdjustment;
+        if (state.fleeMortalsDifficulty !== undefined) this.fleeMortalsDifficulty = state.fleeMortalsDifficulty;
+        if (state.fleeMortalsDayBudget !== undefined) this.fleeMortalsDayBudget = state.fleeMortalsDayBudget;
+        if (state.fleeMortalsSpent !== undefined) this.fleeMortalsSpent = state.fleeMortalsSpent;
+        if (state.selectedPartyName !== undefined) this.selectedPartyName = state.selectedPartyName;
+    }
+
+    getStateSnapshot() {
+        const listArea = this.mainColumnEl ? this.mainColumnEl.querySelector(".ttrpg-vs-best-list-area") : null;
+        return {
+            nameQuery: this.nameQuery,
+            environmentQuery: this.environmentQuery,
+            crQuery: this.crQuery,
+            acQuery: this.acQuery,
+            typeQuery: this.typeQuery,
+            sizeQuery: this.sizeQuery,
+            alignmentQuery: this.alignmentQuery,
+            selectedCRs: Array.from(this.selectedCRs),
+            selectedSources: Array.from(this.selectedSources),
+            selectedTypes: Array.from(this.selectedTypes),
+            selectedAlignments: Array.from(this.selectedAlignments),
+            showFavoritesOnly: this.showFavoritesOnly,
+            selectedBookmarkGroup: this.selectedBookmarkGroup,
+            activeTab: this.activeTab,
+            sortMode: this.sortMode,
+            sortDirection: this.sortDirection,
+            viewMode: this.viewMode,
+            encounterName: this.encounterName,
+            encounter: JSON.parse(JSON.stringify(this.encounter)),
+            partyRows: JSON.parse(JSON.stringify(this.partyRows)),
+            xpMathMode: this.xpMathMode,
+            includePartySizeAdjustment: this.includePartySizeAdjustment,
+            fleeMortalsDifficulty: this.fleeMortalsDifficulty,
+            fleeMortalsDayBudget: this.fleeMortalsDayBudget,
+            fleeMortalsSpent: this.fleeMortalsSpent,
+            selectedPartyName: this.selectedPartyName,
+            wasPopout: this.isPopout,
+            scrollTop: listArea ? listArea.scrollTop : 0,
+            encounterScrollTop: this.encounterColumnEl ? this.encounterColumnEl.scrollTop : 0
+        };
+    }
+
+    getMonsterName(entry) { return entry.collectionName || entry.displayName || entry.fileLabel || entry.path; }
+    getMonsterKey(entry) { return entry.collectionPath || entry.path; }
+    getMonsterMeta(entry) { return entry.monsterMeta || {}; }
+
+    getTrackerPlugin() {
+        if (this.plugin.settings.enableInitiativeTrackerIntegration === false) return null;
+        return this.app.plugins && this.app.plugins.plugins["initiative-tracker"];
+    }
+
+    handleBookmarksChanged() {
+        this._sourcesCache = null;
+        this._typesCache = null;
+        this._alignmentsCache = null;
+        this._monsterImageCache.clear();
+        this.setupFiltersDOM();
+        this.renderFiltersTab();
+        this.renderMainContent();
+    }
+
+    getMonsterStats(entry) {
+        const meta = this.getMonsterMeta(entry);
+        let ac = meta.ac, hp = meta.hp, hit_dice = meta.hit_dice, modifier = meta.modifier;
+        if (!meta._hasResolvedFS && this.plugin.settings.enableFantasyStatblocksIntegration !== false && window.FantasyStatblocks && typeof window.FantasyStatblocks.getCreatureFromBestiary === "function") {
+            try {
+                const fsMonster = window.FantasyStatblocks.getCreatureFromBestiary(this.getMonsterName(entry));
+                if (fsMonster) {
+                    if (!ac) ac = fsMonster.ac || fsMonster.armor_class;
+                    if (!hp) hp = fsMonster.hp || fsMonster.hit_points;
+                    if (!hit_dice) hit_dice = fsMonster.hit_dice || fsMonster.hitDice;
+                    if (modifier == null || modifier === 0) {
+                        const stats = fsMonster.stats || fsMonster.abilities;
+                        const dex = fsMonster.dex || fsMonster.dexterity || (stats && (Array.isArray(stats) ? stats[1] : stats.dex));
+                        if (dex != null) modifier = Math.floor((Number(dex) - 10) / 2);
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to read stats from Fantasy Statblocks:", e);
+            }
+        }
+        return {
+            ac: ac != null ? String(ac).trim() : "",
+            hp: hp != null ? Number(hp) || 0 : 0,
+            hit_dice: hit_dice != null ? String(hit_dice).trim() : "",
+            modifier: modifier != null ? Number(modifier) || 0 : 0
+        };
+    }
+
+    resolveImagePath(imgPath) {
+        if (!imgPath) return "";
+        if (typeof imgPath !== "string") return "";
+        let path = imgPath.trim();
+        if (path.startsWith("[[") && path.endsWith("]]")) {
+            path = path.slice(2, -2).split("|")[0].trim();
+        }
+        if (/^(https?|data|app):/i.test(path)) {
+            return path;
+        }
+        // Strip leading slash — vault paths are relative to root without leading /
+        if (path.startsWith("/")) {
+            path = path.slice(1);
+        }
+        // Try resolving as a link path
+        const file = this.app.metadataCache.getFirstLinkpathDest(path, "");
+        if (file) {
+            return this.app.vault.getResourcePath(file);
+        }
+        // Try resolving just the basename (some vaults store only the filename)
+        const basename = path.split("/").pop();
+        if (basename && basename !== path) {
+            const basenameFile = this.app.metadataCache.getFirstLinkpathDest(basename, "");
+            if (basenameFile) {
+                return this.app.vault.getResourcePath(basenameFile);
+            }
+        }
+        // Try as an abstract file path directly
+        const abstractFile = this.app.vault.getAbstractFileByPath(path);
+        if (abstractFile && abstractFile instanceof TFile) {
+            return this.app.vault.getResourcePath(abstractFile);
+        }
+        if (this.app.vault.adapter.getResourcePath) {
+            return this.app.vault.adapter.getResourcePath(path);
+        }
+        return path;
+    }
+
+    getMonsterImage(entry) {
+        const key = this.getMonsterKey(entry);
+        if (this._monsterImageCache && this._monsterImageCache.has(key)) {
+            return this._monsterImageCache.get(key);
+        }
+
+        const resolveAndCache = () => {
+            const customImage = this.plugin.settings.customMonsterImages?.[key];
+            if (customImage) {
+                const resolved = this.resolveImagePath(customImage);
+                if (resolved) return resolved;
+            }
+            const meta = this.getMonsterMeta(entry);
+            if (meta.image) {
+                const resolved = this.resolveImagePath(meta.image);
+                if (resolved) return resolved;
+            }
+            if (this.plugin.settings.enableFantasyStatblocksIntegration !== false && window.FantasyStatblocks && typeof window.FantasyStatblocks.getCreatureFromBestiary === "function") {
+                try {
+                    const namesToTry = [
+                        this.getMonsterName(entry),
+                        entry.displayName,
+                        entry.fileLabel,
+                        ...(entry.aliases || [])
+                    ].filter(Boolean);
+                    const tried = new Set();
+                    for (const name of namesToTry) {
+                        if (tried.has(name)) continue;
+                        tried.add(name);
+                        const fsMonster = window.FantasyStatblocks.getCreatureFromBestiary(name);
+                        if (fsMonster) {
+                            let imgPath = fsMonster.image || fsMonster.token || fsMonster.avatar || fsMonster.portrait;
+                            if (imgPath) {
+                                return this.resolveImagePath(imgPath);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error("Failed to read token image from Fantasy Statblocks:", e);
+                }
+            }
+            if (entry && entry.path) {
+                try {
+                    const entryPath = entry.path;
+                    const dir = entryPath.substring(0, entryPath.lastIndexOf("/"));
+                    const baseName = entryPath.substring(entryPath.lastIndexOf("/") + 1).replace(/\.md$/i, "");
+                    for (const ext of ["png", "webp", "jpg"]) {
+                        const tokenPath = dir + "/token/" + baseName + "." + ext;
+                        const tokenFile = this.app.vault.getAbstractFileByPath(tokenPath);
+                        if (tokenFile && tokenFile instanceof TFile) {
+                            return this.app.vault.getResourcePath(tokenFile);
+                        }
+                    }
+                } catch (e) {
+                    console.error("Failed to construct token path:", e);
+                }
+            }
+            return null;
+        };
+
+        const result = resolveAndCache();
+        if (this._monsterImageCache) {
+            this._monsterImageCache.set(key, result);
+        }
+        return result;
+    }
+
+    getMonsterDisplayMeta(entry) {
+        const meta = this.getMonsterMeta(entry);
+        const stats = this.getMonsterStats(entry);
+
+        let bestiaryType = meta.bestiaryType || "";
+        let size = meta.size || "";
+        let alignment = meta.alignment || "";
+
+        if (this.plugin.settings.enableFantasyStatblocksIntegration !== false && window.FantasyStatblocks && typeof window.FantasyStatblocks.getCreatureFromBestiary === "function") {
+            try {
+                const fsMonster = window.FantasyStatblocks.getCreatureFromBestiary(this.getMonsterName(entry));
+                if (fsMonster) {
+                    if (!bestiaryType) bestiaryType = fsMonster.bestiaryType || fsMonster.type || "";
+                    if (!size) size = fsMonster.size || "";
+                    if (!alignment) alignment = fsMonster.alignment || "";
+                }
+            } catch (e) {
+                console.error("Failed to read extra meta from Fantasy Statblocks:", e);
+            }
+        }
+
+        return {
+            name: this.getMonsterName(entry),
+            cr: meta.cr || "",
+            ac: stats.ac || meta.ac || "",
+            hp: stats.hp || meta.hp || 0,
+            type: bestiaryType,
+            size: size,
+            alignment: alignment,
+            source: this.plugin.getSourceDisplayLabel(entry.sourceKey, entry.sourceLabel || entry.sourceKey)
+        };
+    }
+
+    formatType(type) {
+        if (!type) return "—";
+        return String(type)
+            .split(/[\s-]+/)
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+            .join(" ");
+    }
+
+    async startCombat() {
+        const tracker = this.getTrackerPlugin();
+        if (!tracker) {
+            new Notice("Initiative Tracker plugin is not enabled.");
+            return;
+        }
+        const creatures = [];
+        if (this.selectedPartyName !== "custom" && tracker.data?.parties) {
+            const party = tracker.data.parties.find(p => p.name === this.selectedPartyName);
+            if (party && party.players) {
+                for (const pName of party.players) {
+                    const p = tracker.getPlayerByName(pName);
+                    if (p) {
+                        creatures.push({
+                            name: p.name,
+                            hp: p.hp || 0,
+                            ac: p.ac || 10,
+                            modifier: p.modifier || 0,
+                            level: p.level || 1,
+                            player: true,
+                            path: p.path || ""
+                        });
+                    }
+                }
+            }
+        } else {
+            let customId = 1;
+            for (const row of this.partyRows) {
+                const level = Math.max(1, Math.min(20, Number(row.level) || 1));
+                const count = Math.max(0, Math.floor(Number(row.count) || 0));
+                for (let i = 0; i < count; i++) {
+                    creatures.push({
+                        name: `Player ${customId++} (Lvl ${level})`,
+                        hp: 0,
+                        ac: 10,
+                        modifier: 0,
+                        level: level,
+                        player: true
+                    });
+                }
+            }
+        }
+        for (const m of this.encounter) {
+            const entry = this.plugin.getEntries().find(e => this.getMonsterKey(e) === m.key || e.path === m.key);
+            let stats = { ac: "", hp: 0, hit_dice: "", modifier: 0 };
+            if (entry) {
+                stats = this.getMonsterStats(entry);
+            }
+            const qty = Math.max(1, Number(m.qty) || 1);
+            for (let i = 0; i < qty; i++) {
+                creatures.push({
+                    name: qty > 1 ? `${m.name} ${i + 1}` : m.name,
+                    hp: stats.hp || 0,
+                    ac: Number(stats.ac) || 10,
+                    modifier: stats.modifier || 0,
+                    cr: m.cr || "",
+                    xp: m.xp || 0,
+                    hit_dice: stats.hit_dice || "",
+                    player: false,
+                    path: m.key || ""
+                });
+            }
+        }
+        if (!creatures.length) {
+            new Notice("No combatants in encounter to start combat.");
+            return;
+        }
+        try {
+            if (window.InitiativeTracker && typeof window.InitiativeTracker.newEncounter === "function") {
+                window.InitiativeTracker.newEncounter({
+                    name: this.encounterName || "Encounter",
+                    creatures: creatures
+                });
+                new Notice("Combat launched in Initiative Tracker!");
+                if (this.onClose) this.onClose();
+            } else {
+                this.app.workspace.trigger("initiative-tracker:start-encounter", creatures);
+                new Notice("Combat started via workspace event.");
+                if (this.onClose) this.onClose();
+            }
+        } catch (e) {
+            console.error("Failed to start combat:", e);
+            new Notice("Error starting combat. See console.");
+        }
+    }
+
+    refreshPartyFromTracker() {
+        if (this.selectedPartyName === "custom") return;
+        const tracker = this.getTrackerPlugin();
+        if (!tracker || !tracker.data?.parties) return;
+        const party = tracker.data.parties.find(p => p.name === this.selectedPartyName);
+        if (!party || !party.players) return;
+        const levels = {};
+        for (const pName of party.players) {
+            const p = tracker.getPlayerByName(pName);
+            const lvl = p?.level || 5;
+            levels[lvl] = (levels[lvl] || 0) + 1;
+        }
+        const rows = [];
+        for (const [lvl, count] of Object.entries(levels)) {
+            rows.push({ level: Number(lvl), count: Number(count) });
+        }
+        this.partyRows = rows.length ? rows : [{ level: 5, count: 1 }];
+    }
+
+    randomizeEncounter(difficulty) {
+        const party = this.getPartySummary();
+        if (party.players <= 0) {
+            new Notice("Please add players to your party first.");
+            return;
+        }
+        const budget = party.thresholds[difficulty] || party.thresholds.medium;
+        if (!budget) {
+            new Notice("Party budget not calculated.");
+            return;
+        }
+        const settings = this.plugin.settings;
+        const candidates = this.filteredEntries().filter(e => {
+            const crRaw = this.getMonsterMeta(e).cr;
+            if (crRaw == null || crRaw === "") return false;
+            const crNum = this.crToNumber(crRaw);
+
+            // Exclude CR 0 creatures from easy encounters
+            if (difficulty === "easy" && crNum === 0) return false;
+
+            // Apply settings constraints
+            if (settings.randomEncounterMinCR !== undefined && settings.randomEncounterMinCR !== "") {
+                const minCR = this.crToNumber(settings.randomEncounterMinCR);
+                if (crNum < minCR) return false;
+            }
+            if (settings.randomEncounterMaxCR !== undefined && settings.randomEncounterMaxCR !== "") {
+                const maxCR = this.crToNumber(settings.randomEncounterMaxCR);
+                if (crNum > maxCR) return false;
+            }
+            if (settings.randomEncounterSources !== undefined && settings.randomEncounterSources.trim() !== "") {
+                const allowedSources = settings.randomEncounterSources.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+                if (allowedSources.length && !allowedSources.includes(e.sourceKey.toLowerCase())) return false;
+            }
+            return true;
+        });
+        if (!candidates.length) {
+            new Notice("No monsters match active filters to randomize from.");
+            return;
+        }
+        const selectRandomCandidate = () => {
+            return candidates[Math.floor(Math.random() * candidates.length)];
+        };
+        const getAdjustedXP = (raw, count) => {
+            const baseMult = this.getBaseEncounterMultiplier(count);
+            const mult = this.getAdjustedEncounterMultiplier(baseMult, party.players);
+            return Math.round(raw * mult);
+        };
+        let bestSet = [];
+        let bestDiff = Infinity;
+        for (let pass = 0; pass < 50; pass++) {
+            const currentSet = [];
+            let currentXP = 0;
+            let currentRaw = 0;
+            let currentCount = 0;
+            const maxMonsters = difficulty === "deadly" ? 20 : 12;
+            while (currentXP < budget && currentCount < maxMonsters) {
+                const monster = selectRandomCandidate();
+                const meta = this.getMonsterMeta(monster);
+                const xp = meta.xp || BESTIARY_XP_BY_CR[meta.cr] || 0;
+                if (xp > budget && currentCount > 0) break;
+                const key = this.getMonsterKey(monster);
+                const name = this.getMonsterName(monster);
+                const existing = currentSet.find(x => x.key === key);
+                if (existing) {
+                    existing.qty++;
+                } else {
+                    currentSet.push({
+                        key,
+                        name,
+                        qty: 1,
+                        cr: meta.cr,
+                        xp: xp
+                    });
+                }
+                currentRaw += xp;
+                currentCount++;
+                currentXP = getAdjustedXP(currentRaw, currentCount);
+            }
+            const diff = Math.abs(currentXP - budget);
+            if (diff < bestDiff && currentXP > 0 && currentXP <= budget * 1.25) {
+                bestDiff = diff;
+                bestSet = currentSet;
+            }
+        }
+        if (bestSet.length) {
+            this.encounter = bestSet;
+            new Notice(`Generated ${difficulty} random encounter.`);
+            this.updateEncounterMonstersDOM();
+            this.updateXPSummary();
+            void this.saveStateToSettings();
+        } else {
+            new Notice("Could not balance a random encounter with active filters. Try widening CR or sources.");
+        }
+    }
+
+    getSources() {
+        if (this._sourcesCache) return this._sourcesCache;
+        const map = new Map();
+        for (const entry of this.plugin.getBestiaryEntries()) {
+            const key = entry.sourceKey;
+            if (!key) continue;
+            if (!map.has(key)) {
+                map.set(key, {
+                    key: key,
+                    label: this.plugin.getSourceDisplayLabel(key, entry.sourceLabel || key)
+                });
+            }
+        }
+        this._sourcesCache = Array.from(map.values()).sort((a, b) => COLLATOR.compare(a.label, b.label));
+        return this._sourcesCache;
+    }
+
+    getTypes() {
+        if (this._typesCache) return this._typesCache;
+        this._typesCache = [...new Set(this.plugin.getBestiaryEntries().map(e => (this.getMonsterMeta(e).bestiaryType || "").toLowerCase()).filter(Boolean))].sort((a, b) => COLLATOR.compare(a, b));
+        return this._typesCache;
+    }
+
+    getAlignments() {
+        if (this._alignmentsCache) return this._alignmentsCache;
+        this._alignmentsCache = [...new Set(this.plugin.getBestiaryEntries().map(e => {
+            const meta = this.getMonsterMeta(e);
+            const al = meta.alignment || "";
+            return al ? al.toLowerCase().trim() : "";
+        }).filter(Boolean))].sort((a, b) => COLLATOR.compare(a, b));
+        return this._alignmentsCache;
+    }
+
+    filteredEntries() {
+        const nq = this.nameQuery.trim().toLowerCase();
+        const eq = this.environmentQuery.trim().toLowerCase();
+        const favs = new Set(this.plugin.getBestiaryFavorites());
+        let entries = this.plugin.getBestiaryEntries().filter((entry) => {
+            const meta = this.getMonsterMeta(entry);
+            const name = this.getMonsterName(entry).toLowerCase();
+            const sourceKey = entry.sourceKey || "";
+            const typeKey = meta._normalizedTypeKey || "";
+            if (nq && !name.includes(nq)) return false;
+            if (eq && !String(meta.environment || "").toLowerCase().includes(eq)) return false;
+            if (this.showFavoritesOnly && !favs.has(this.getMonsterKey(entry)) && !favs.has(entry.path)) return false;
+
+            if (this.selectedBookmarkGroup) {
+                const entryKey = this.getMonsterKey(entry);
+                const entryPath = entry.path || "";
+                const isBookmarked = this.plugin.isBookmarked(entryPath) || this.plugin.isBookmarked(entryKey);
+                if (!isBookmarked) return false;
+
+                if (this.selectedBookmarkGroup !== "all") {
+                    const gId = this.plugin.getBookmarkGroupForPath(entryPath) || this.plugin.getBookmarkGroupForPath(entryKey);
+                    if (this.selectedBookmarkGroup === "ungrouped") {
+                        if (gId) return false;
+                    } else {
+                        if (gId !== this.selectedBookmarkGroup) return false;
+                    }
+                }
+            }
+
+            if (this.crQuery) {
+                const cq = this.crQuery.trim().toLowerCase();
+                if (cq && !String(meta.cr || "").toLowerCase().includes(cq)) return false;
+            }
+            if (this.acQuery) {
+                const aq = this.acQuery.trim().toLowerCase();
+                if (aq && !String(meta.ac || "").toLowerCase().includes(aq)) return false;
+            }
+            if (this.typeQuery) {
+                const tq = this.typeQuery.trim().toLowerCase();
+                if (tq && !String(meta.bestiaryType || "").toLowerCase().includes(tq)) return false;
+            }
+            if (this.sizeQuery) {
+                const sq = this.sizeQuery.trim().toLowerCase();
+                if (sq && !String(meta.size || "").toLowerCase().includes(sq)) return false;
+            }
+            if (this.alignmentQuery) {
+                const alq = this.alignmentQuery.trim().toLowerCase();
+                if (alq && !String(meta.alignment || "").toLowerCase().includes(alq)) return false;
+            }
+            if (this.selectedCRs.size && !this.selectedCRs.has(meta.cr || "")) return false;
+            if (this.selectedSources.size && !this.selectedSources.has(sourceKey)) return false;
+            if (this.selectedTypes.size && !this.selectedTypes.has(typeKey)) return false;
+            if (this.selectedAlignments.size) {
+                const alignKey = meta._normalizedAlignmentKey || "";
+                if (!this.selectedAlignments.has(alignKey)) return false;
+            }
+            return true;
+        });
+        entries.sort((a, b) => {
+            const am = this.getMonsterMeta(a), bm = this.getMonsterMeta(b);
+            let diff = 0;
+            if (this.sortMode === "cr") {
+                diff = (BESTIARY_CR_ORDER.indexOf(am.cr) - BESTIARY_CR_ORDER.indexOf(bm.cr));
+            } else if (this.sortMode === "source") {
+                const aLabel = this.plugin.getSourceDisplayLabel(a.sourceKey, a.sourceLabel || a.sourceKey);
+                const bLabel = this.plugin.getSourceDisplayLabel(b.sourceKey, b.sourceLabel || b.sourceKey);
+                diff = COLLATOR.compare(aLabel || "", bLabel || "");
+            } else if (this.sortMode === "type") {
+                diff = COLLATOR.compare(am.bestiaryType || "", bm.bestiaryType || "");
+            } else if (this.sortMode === "ac") {
+                diff = (Number(am.ac) || 0) - (Number(bm.ac) || 0);
+            } else if (this.sortMode === "hp") {
+                diff = (Number(am.hp) || 0) - (Number(bm.hp) || 0);
+            } else if (this.sortMode === "size") {
+                const sizeOrder = ["tiny", "small", "medium", "large", "huge", "gargantuan"];
+                diff = sizeOrder.indexOf((am.size || "").toLowerCase()) - sizeOrder.indexOf((bm.size || "").toLowerCase());
+            } else if (this.sortMode === "alignment") {
+                diff = COLLATOR.compare(am.alignment || "", bm.alignment || "");
+            } else {
+                diff = COLLATOR.compare(this.getMonsterName(a), this.getMonsterName(b));
+            }
+            if (diff === 0) {
+                return COLLATOR.compare(this.getMonsterName(a), this.getMonsterName(b));
+            }
+            return this.sortDirection === "asc" ? diff : -diff;
+        });
+        return entries;
+    }
+
+    build() {
+        this.containerEl.empty();
+
+        const headerEl = this.containerEl.createDiv({ cls: "ttrpg-bestiary-header" });
+        headerEl.style.display = "flex";
+        headerEl.style.justifyContent = "space-between";
+        headerEl.style.alignItems = "center";
+        headerEl.style.marginBottom = "8px";
+        headerEl.style.paddingBottom = "6px";
+        headerEl.style.borderBottom = "1px solid var(--background-modifier-border)";
+
+        const titleEl = headerEl.createDiv({ cls: "ttrpg-bestiary-title-text", text: "TTRPG Bestiary / Encounter Builder" });
+        titleEl.style.fontSize = "16px";
+        titleEl.style.fontWeight = "bold";
+
+        const actionsEl = headerEl.createDiv({ cls: "ttrpg-bestiary-actions" });
+        actionsEl.style.display = "flex";
+        actionsEl.style.gap = "8px";
+        actionsEl.style.alignItems = "center";
+
+        const viewModeSelect = actionsEl.createEl("select", { cls: "ttrpg-bestiary-view-select" });
+        stopSelectPropagation(viewModeSelect);
+        viewModeSelect.style.padding = "4px 8px";
+        viewModeSelect.style.fontSize = "12px";
+        [["cards", "▦ Cards"], ["table", "▤ Table"]].forEach(([val, lbl]) => {
+            const opt = viewModeSelect.createEl("option", { value: val, text: lbl });
+            if (this.viewMode === val) opt.selected = true;
+        });
+        viewModeSelect.addEventListener("change", () => {
+            this.viewMode = viewModeSelect.value;
+            this.renderMainContent();
+        });
+
+        if (!this.isPopout) {
+            const popoutBtn = actionsEl.createEl("button", { text: "⤢ Pop Out", cls: "ttrpg-bestiary-popout-btn" });
+            popoutBtn.title = "Open in its own window";
+            popoutBtn.addEventListener("click", async () => {
+                const snap = this.getStateSnapshot();
+                if (this.onClose) this.onClose();
+                await this.plugin.openBestiaryPopout(snap);
+            });
+        } else {
+            const popinBtn = actionsEl.createEl("button", { text: "⤡ Pop In", cls: "ttrpg-bestiary-popin-btn" });
+            popinBtn.title = "Move back to main window";
+            popinBtn.addEventListener("click", () => {
+                const snap = this.getStateSnapshot();
+                snap.forceModal = true;
+                if (this.onClose) this.onClose();
+                this.plugin.openBestiaryModal(snap);
+            });
+        }
+
+        const toggleEncounterBtn = actionsEl.createEl("button", {
+            cls: "ttrpg-bestiary-toggle-encounter-btn",
+            text: this.encounterMinimised ? "Expand Encounter" : "Collapse Encounter"
+        });
+        toggleEncounterBtn.addEventListener("click", () => {
+            this.encounterMinimised = !this.encounterMinimised;
+            this.plugin.settings.bestiaryEncounterMinimised = this.encounterMinimised;
+            void this.plugin.saveSettings(false);
+            toggleEncounterBtn.setText(this.encounterMinimised ? "Expand Encounter" : "Collapse Encounter");
+            this.updateLayout();
+        });
+
+        const root = this.containerEl.createDiv({ cls: "ttrpg-vs-best-root" });
+
+        this.filtersColumnEl = root.createDiv({ cls: "ttrpg-vs-best-filters" });
+        const splitterLeft = root.createDiv({ cls: "ttrpg-vs-best-splitter" });
+        this.mainColumnEl = root.createDiv({ cls: "ttrpg-vs-best-main" });
+        this.splitterRightEl = root.createDiv({ cls: "ttrpg-vs-best-splitter" });
+        this.encounterColumnEl = root.createDiv({ cls: "ttrpg-vs-best-encounter" });
+
+        this.makeResizable(splitterLeft, this.filtersColumnEl, this.mainColumnEl, false);
+        this.makeResizable(this.splitterRightEl, this.mainColumnEl, this.encounterColumnEl, true);
+
+        this.setupFiltersDOM();
+        this.renderFiltersTab();
+        this.renderMainContent();
+        this.setupEncounterDOM();
+        this.updateEncounterPanel();
+        this.updateLayout();
+
+        if (this.initialState) {
+            const state = this.initialState;
+            if (state.scrollTop) {
+                const listArea = this.mainColumnEl.querySelector(".ttrpg-vs-best-list-area");
+                if (listArea) {
+                    requestAnimationFrame(() => {
+                        listArea.scrollTop = state.scrollTop;
+                    });
+                }
+            }
+            if (state.encounterScrollTop) {
+                if (this.encounterColumnEl) {
+                    requestAnimationFrame(() => {
+                        this.encounterColumnEl.scrollTop = state.encounterScrollTop;
+                    });
+                }
+            }
+        }
+    }
+
+    makeResizable(splitter, leftEl, rightEl, isRightSplitter) {
+        let startX, startWidth;
+        const onMouseDown = (e) => {
+            startX = e.clientX;
+            startWidth = isRightSplitter ? rightEl.offsetWidth : leftEl.offsetWidth;
+            splitter.classList.add("is-dragging");
+            document.addEventListener("mousemove", onMouseMove);
+            document.addEventListener("mouseup", onMouseUp);
+            e.preventDefault();
+        };
+        const onMouseMove = (e) => {
+            const deltaX = e.clientX - startX;
+            let newWidth;
+            if (isRightSplitter) {
+                newWidth = startWidth - deltaX;
+                if (newWidth < 180) newWidth = 180;
+                if (newWidth > 600) newWidth = 600;
+                this.encounterWidth = newWidth;
+                rightEl.style.width = `${newWidth}px`;
+                this.plugin.settings.bestiaryEncounterWidth = newWidth;
+            } else {
+                newWidth = startWidth + deltaX;
+                if (newWidth < 180) newWidth = 180;
+                if (newWidth > 500) newWidth = 500;
+                this.filterWidth = newWidth;
+                leftEl.style.width = `${newWidth}px`;
+                this.plugin.settings.bestiaryFilterWidth = newWidth;
+            }
+        };
+        const onMouseUp = () => {
+            splitter.classList.remove("is-dragging");
+            document.removeEventListener("mousemove", onMouseMove);
+            document.removeEventListener("mouseup", onMouseUp);
+            void this.plugin.saveSettings(false);
+        };
+        splitter.addEventListener("mousedown", onMouseDown);
+    }
+
+    updateLayout() {
+        this.filtersColumnEl.style.width = `${this.filterWidth}px`;
+        this.filtersColumnEl.style.flexShrink = "0";
+
+        this.mainColumnEl.style.flex = "1 1 0";
+        this.mainColumnEl.style.minWidth = "200px";
+
+        if (this.encounterMinimised) {
+            this.encounterColumnEl.style.display = "none";
+            this.splitterRightEl.style.display = "none";
+        } else {
+            this.encounterColumnEl.style.display = "flex";
+            this.encounterColumnEl.style.width = `${this.encounterWidth}px`;
+            this.encounterColumnEl.style.flexShrink = "0";
+            this.splitterRightEl.style.display = "block";
+        }
+    }
+
+    async saveStateToSettings() {
+        this.plugin.settings.bestiaryEncounterName = this.encounterName;
+        this.plugin.settings.bestiaryEncounter = JSON.parse(JSON.stringify(this.encounter));
+        this.plugin.settings.bestiaryPartyRows = JSON.parse(JSON.stringify(this.partyRows));
+        this.plugin.settings.bestiaryXpMathMode = this.xpMathMode;
+        this.plugin.settings.bestiarySelectedPartyName = this.selectedPartyName;
+        this.plugin.settings.bestiaryIncludePartySizeAdjustment = this.includePartySizeAdjustment;
+        this.plugin.settings.bestiaryFleeMortalsDifficulty = this.fleeMortalsDifficulty;
+        this.plugin.settings.bestiaryFleeMortalsDayBudget = this.fleeMortalsDayBudget;
+        this.plugin.settings.bestiaryFleeMortalsSpent = this.fleeMortalsSpent;
+        await this.plugin.saveSettings(false);
+    }
+
+    setupFiltersDOM() {
+        const el = this.filtersColumnEl;
+        el.empty();
+
+        const label = (text) => el.createDiv({ cls: "ttrpg-vs__label", text });
+
+        label("Name");
+        const name = el.createEl("input");
+        name.type = "text";
+        name.value = this.nameQuery;
+        name.placeholder = "Text";
+        name.style.width = "100%";
+        name.style.boxSizing = "border-box";
+        name.addEventListener("input", () => {
+            this.nameQuery = name.value;
+            this.debouncedMainRender();
+        });
+
+        label("Environment");
+        const env = el.createEl("input");
+        env.type = "text";
+        env.value = this.environmentQuery;
+        env.placeholder = "Text";
+        env.style.width = "100%";
+        env.style.boxSizing = "border-box";
+        env.addEventListener("input", () => {
+            this.environmentQuery = env.value;
+            this.debouncedMainRender();
+        });
+
+        const favRow = el.createDiv();
+        favRow.style.marginTop = "8px";
+        favRow.style.marginBottom = "8px";
+        const fav = favRow.createEl("input");
+        fav.type = "checkbox";
+        fav.checked = this.showFavoritesOnly;
+        fav.addEventListener("change", () => {
+            this.showFavoritesOnly = fav.checked;
+            this.debouncedMainRender();
+        });
+        favRow.appendText(" Favorites");
+
+        const bmGroupRow = el.createDiv();
+        bmGroupRow.style.marginTop = "6px";
+        bmGroupRow.style.marginBottom = "8px";
+        bmGroupRow.createDiv({ cls: "ttrpg-vs__label", text: "Bookmark Group" }).style.marginBottom = "4px";
+
+        const bmSelect = bmGroupRow.createEl("select");
+        stopSelectPropagation(bmSelect);
+        bmSelect.style.width = "100%";
+        bmSelect.appendChild(Object.assign(document.createElement("option"), { value: "", textContent: "None (All Monsters)" }));
+        bmSelect.appendChild(Object.assign(document.createElement("option"), { value: "all", textContent: "All Bookmarked" }));
+        bmSelect.appendChild(Object.assign(document.createElement("option"), { value: "ungrouped", textContent: "Ungrouped Bookmarks" }));
+
+        for (const group of this.plugin.getBookmarkGroups()) {
+            const opt = document.createElement("option");
+            opt.value = group.id;
+            opt.textContent = group.name;
+            bmSelect.appendChild(opt);
+        }
+        bmSelect.value = this.selectedBookmarkGroup || "";
+        bmSelect.addEventListener("change", () => {
+            this.selectedBookmarkGroup = bmSelect.value;
+            this.debouncedMainRender();
+        });
+
+        const filterActionsRow = el.createDiv();
+        filterActionsRow.style.display = "flex";
+        filterActionsRow.style.gap = "6px";
+        filterActionsRow.style.marginBottom = "10px";
+
+        const clear = filterActionsRow.createEl("button", { text: "↻ Clear" });
+        clear.style.flex = "1";
+        clear.style.boxSizing = "border-box";
+
+        const presetSelect = filterActionsRow.createEl("select");
+        stopSelectPropagation(presetSelect);
+        presetSelect.style.flex = "1";
+        presetSelect.style.boxSizing = "border-box";
+        presetSelect.appendChild(Object.assign(document.createElement("option"), { value: "", textContent: "Preset…" }));
+        for (const preset of this.plugin.getFilterPresets()) {
+            const opt = document.createElement("option");
+            opt.value = preset.id;
+            opt.textContent = preset.name;
+            presetSelect.appendChild(opt);
+        }
+
+        clear.addEventListener("click", () => {
+            this.nameQuery = "";
+            name.value = "";
+            this.environmentQuery = "";
+            env.value = "";
+            this.crQuery = "";
+            this.acQuery = "";
+            this.typeQuery = "";
+            this.sizeQuery = "";
+            this.alignmentQuery = "";
+            this.selectedCRs.clear();
+            this.selectedSources.clear();
+            this.selectedTypes.clear();
+            this.selectedAlignments.clear();
+            this.showFavoritesOnly = false;
+            this.selectedBookmarkGroup = "";
+            fav.checked = false;
+            bmSelect.value = "";
+            presetSelect.value = "";
+            this.renderFiltersTab();
+            this.debouncedMainRender();
+        });
+
+        presetSelect.addEventListener("change", () => {
+            const preset = this.plugin.getFilterPresets().find(p => p.id === presetSelect.value);
+            if (!preset) return;
+            const validSources = new Set(this.getSources().map(s => s.key));
+            this.selectedSources = new Set((preset.sources || []).map(normalizeKey).filter(k => validSources.has(k)));
+            if (preset.types && preset.types.length) {
+                const validTypes = new Set(this.getTypes().map(t => normalizeKey(t)));
+                this.selectedTypes = new Set((preset.types || []).map(normalizeKey).filter(t => validTypes.has(t)));
+            }
+            this.renderFiltersTab();
+            this.debouncedMainRender();
+        });
+
+        const tabs = el.createDiv({ cls: "ttrpg-bestiary-filter-tabs" });
+        tabs.style.display = "flex";
+        tabs.style.gap = "4px";
+        tabs.style.marginBottom = "8px";
+
+        this.tabButtons = {};
+        ["General", "Sources", "CR", "Type", "Alignment"].forEach(t => {
+            const b = tabs.createEl("button", { text: t });
+            b.style.flex = "1";
+            b.style.padding = "4px 6px";
+            b.style.fontSize = "11px";
+            b.addEventListener("click", () => {
+                this.activeTab = t;
+                Object.keys(this.tabButtons).forEach(k => {
+                    this.tabButtons[k].classList.toggle("is-active", k === t);
+                });
+                this.renderFiltersTab();
+            });
+            if (this.activeTab === t) b.addClass("is-active");
+            this.tabButtons[t] = b;
+        });
+
+        const boxOuter = el.createDiv();
+        boxOuter.style.overflowY = "auto";
+        boxOuter.style.flex = "1";
+        boxOuter.style.minHeight = "0";
+        boxOuter.style.border = "1px solid var(--background-modifier-border)";
+        boxOuter.style.borderRadius = "6px";
+        boxOuter.style.padding = "8px";
+        boxOuter.style.background = "var(--background-secondary)";
+
+        this.filtersCheckboxListEl = boxOuter.createDiv();
+        this.filtersCheckboxListEl.style.display = "flex";
+        this.filtersCheckboxListEl.style.flexDirection = "column";
+        this.filtersCheckboxListEl.style.gap = "6px";
+    }
+
+    renderFiltersTab() {
+        const box = this.filtersCheckboxListEl;
+        box.empty();
+
+        box.style.display = "flex";
+        box.style.flexDirection = "column";
+        box.style.gap = "6px";
+        box.style.gridTemplateColumns = "";
+
+        if (["CR", "Sources", "Type", "Alignment"].includes(this.activeTab)) {
+            const btnRow = box.createDiv();
+            btnRow.style.display = "flex";
+            btnRow.style.gap = "8px";
+            btnRow.style.marginBottom = "6px";
+            if (this.activeTab === "CR") {
+                btnRow.style.gridColumn = "span 2";
+            }
+
+            const selectAll = btnRow.createEl("button");
+            selectAll.setText("Select All");
+            selectAll.style.padding = "2px 8px";
+            selectAll.style.fontSize = "11px";
+            selectAll.addEventListener("click", (e) => {
+                e.preventDefault();
+                let items = [];
+                let set = null;
+                if (this.activeTab === "CR") {
+                    items = BESTIARY_CR_ORDER;
+                    set = this.selectedCRs;
+                } else if (this.activeTab === "Sources") {
+                    items = this.getSources().map(s => s.key);
+                    set = this.selectedSources;
+                } else if (this.activeTab === "Type") {
+                    items = this.getTypes().map(t => normalizeKey(t));
+                    set = this.selectedTypes;
+                } else if (this.activeTab === "Alignment") {
+                    items = this.getAlignments().map(a => normalizeKey(a));
+                    set = this.selectedAlignments;
+                }
+                if (set) {
+                    items.forEach(item => set.add(item));
+                    this.renderFiltersTab();
+                    this.debouncedMainRender();
+                }
+            });
+
+            const unselectAll = btnRow.createEl("button");
+            unselectAll.setText("Unselect All");
+            unselectAll.style.padding = "2px 8px";
+            unselectAll.style.fontSize = "11px";
+            unselectAll.addEventListener("click", (e) => {
+                e.preventDefault();
+                let set = null;
+                if (this.activeTab === "CR") {
+                    set = this.selectedCRs;
+                } else if (this.activeTab === "Sources") {
+                    set = this.selectedSources;
+                } else if (this.activeTab === "Type") {
+                    set = this.selectedTypes;
+                } else if (this.activeTab === "Alignment") {
+                    set = this.selectedAlignments;
+                }
+                if (set) {
+                    set.clear();
+                    this.renderFiltersTab();
+                    this.debouncedMainRender();
+                }
+            });
+        }
+
+        if (this.activeTab === "CR") {
+            box.style.display = "grid";
+            box.style.gridTemplateColumns = "1fr 1fr";
+            BESTIARY_CR_ORDER.forEach(cr => {
+                this.renderCheck(box, cr, this.selectedCRs, cr);
+            });
+        } else if (this.activeTab === "Sources") {
+            this.getSources().forEach(src => {
+                this.renderCheck(box, src.label, this.selectedSources, src.key, (e) => {
+                    new SourceChipEditModal(this.app, this.plugin, src.key, src.label).open();
+                });
+            });
+        } else if (this.activeTab === "Type") {
+            this.getTypes().forEach(type => {
+                this.renderCheck(box, this.formatType(type), this.selectedTypes, normalizeKey(type));
+            });
+        } else if (this.activeTab === "Alignment") {
+            this.getAlignments().forEach(al => {
+                this.renderCheck(box, this.formatType(al), this.selectedAlignments, normalizeKey(al));
+            });
+        } else if (this.activeTab === "General") {
+            const addField = (label, value, onInput, placeholder = "Text") => {
+                box.createDiv({ cls: "ttrpg-vs__label", text: label }).style.marginTop = "4px";
+                const inp = box.createEl("input");
+                inp.type = "text";
+                inp.value = value;
+                inp.placeholder = placeholder;
+                inp.style.width = "100%";
+                inp.style.boxSizing = "border-box";
+                inp.addEventListener("input", () => {
+                    onInput(inp.value);
+                    this.debouncedMainRender();
+                });
+                return inp;
+            };
+
+            addField("CR", this.crQuery, (val) => { this.crQuery = val; });
+            addField("AC", this.acQuery, (val) => { this.acQuery = val; });
+            addField("Type", this.typeQuery, (val) => { this.typeQuery = val; });
+            addField("Size", this.sizeQuery, (val) => { this.sizeQuery = val; });
+            addField("Alignment", this.alignmentQuery, (val) => { this.alignmentQuery = val; });
+        } else {
+            box.createDiv({
+                text: "Use Name, Environment, Favorites, Sources, CR, Type, and Alignment filters.",
+                cls: "ttrpg-vs__meta-text"
+            }).style.padding = "4px";
+        }
+    }
+
+    renderCheck(parent, label, set, value, onContextMenu) {
+        const row = parent.createDiv();
+        row.style.display = "flex";
+        row.style.alignItems = "center";
+        row.style.gap = "6px";
+        row.style.fontSize = "13px";
+
+        const cb = row.createEl("input");
+        cb.type = "checkbox";
+        cb.checked = set.has(value);
+        cb.addEventListener("change", () => {
+            if (cb.checked) set.add(value);
+            else set.delete(value);
+            this.debouncedMainRender();
+        });
+
+        const lbl = row.createEl("span", { text: label });
+        lbl.style.cursor = "pointer";
+        lbl.addEventListener("click", () => {
+            cb.checked = !cb.checked;
+            cb.dispatchEvent(new Event("change"));
+        });
+
+        if (onContextMenu) {
+            row.addEventListener("contextmenu", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onContextMenu(e);
+            });
+        }
+    }
+
+    hasActiveFilters() {
+        return this.nameQuery.trim() !== "" ||
+            this.environmentQuery.trim() !== "" ||
+            this.crQuery.trim() !== "" ||
+            this.acQuery.trim() !== "" ||
+            this.typeQuery.trim() !== "" ||
+            this.sizeQuery.trim() !== "" ||
+            this.alignmentQuery.trim() !== "" ||
+            this.selectedCRs.size > 0 ||
+            this.selectedSources.size > 0 ||
+            this.selectedTypes.size > 0 ||
+            this.selectedAlignments.size > 0 ||
+            this.showFavoritesOnly;
+    }
+
+    renderMainContent() {
+        if (this.randBtn) {
+            const hasFilters = this.hasActiveFilters();
+            this.randBtn.setText(hasFilters ? "🎲 Randomize (Filtered Pool)" : "🎲 Randomize (All Monsters)");
+        }
+        const el = this.mainColumnEl;
+        const oldListArea = el.querySelector(".ttrpg-vs-best-list-area");
+        const savedScrollTop = oldListArea ? oldListArea.scrollTop : 0;
+
+        el.empty();
+
+        const filtered = this.filteredEntries();
+
+        const toolbar = el.createDiv();
+        toolbar.style.display = "flex";
+        toolbar.style.gap = "8px";
+        toolbar.style.alignItems = "center";
+        toolbar.style.marginBottom = "8px";
+
+        const titleText = this.viewMode === "cards" ? "▦ Cards" : "▤ Table";
+        toolbar.createSpan({ text: titleText }).style.fontWeight = "bold";
+
+        const countVal = filtered.length;
+        const count = toolbar.createSpan({ text: String(countVal) + " results" });
+        count.style.color = "var(--text-accent)";
+        count.style.fontSize = "12px";
+
+        const spacer = toolbar.createDiv();
+        spacer.style.flex = "1";
+
+        const sort = toolbar.createEl("select");
+        stopSelectPropagation(sort);
+        sort.style.padding = "4px 8px";
+        sort.style.fontSize = "12px";
+        [["name", "Name"], ["cr", "CR"], ["ac", "AC"], ["hp", "HP"], ["source", "Source"], ["type", "Type"], ["size", "Size"], ["alignment", "Alignment"]].forEach(([v, t]) => {
+            const o = sort.createEl("option", { text: t, value: v });
+            if (v === this.sortMode) o.selected = true;
+        });
+        sort.addEventListener("change", () => {
+            this.sortMode = sort.value;
+            this.renderMainContent();
+        });
+
+        const dirBtn = toolbar.createEl("button");
+        dirBtn.style.padding = "4px 8px";
+        dirBtn.style.fontSize = "12px";
+        dirBtn.setText(this.sortDirection === "asc" ? "▲" : "▼");
+        dirBtn.title = this.sortDirection === "asc" ? "Sort Ascending" : "Sort Descending";
+        dirBtn.addEventListener("click", () => {
+            this.sortDirection = this.sortDirection === "asc" ? "desc" : "asc";
+            this.renderMainContent();
+        });
+
+        const listArea = el.createDiv();
+        listArea.className = "ttrpg-vs-best-list-area";
+        listArea.style.overflowY = "auto";
+        listArea.style.flex = "1";
+        listArea.style.minHeight = "0";
+
+        const entries = filtered.slice(0, this.plugin.settings.maxResults || 250);
+
+        if (this.viewMode === "cards") {
+            const grid = listArea.createDiv();
+            grid.style.display = "grid";
+            grid.style.gridTemplateColumns = "repeat(auto-fill, minmax(190px, 1fr))";
+            grid.style.gap = "12px";
+            entries.forEach(entry => this.renderCard(grid, entry));
+        } else {
+            this.renderTable(listArea, entries);
+        }
+
+        if (savedScrollTop) {
+            listArea.scrollTop = savedScrollTop;
+        }
+    }
+
+    renderCard(grid, entry) {
+        const meta = this.getMonsterMeta(entry);
+        const name = this.getMonsterName(entry);
+        const card = grid.createDiv({ cls: "ttrpg-vs-best-card" });
+        card.style.border = "1px solid var(--background-modifier-border)";
+        card.style.borderRadius = "8px";
+        card.style.overflow = "hidden";
+        card.style.background = "var(--background-secondary)";
+
+        const art = card.createDiv();
+        art.style.height = "120px";
+        art.style.display = "flex";
+        art.style.alignItems = "center";
+        art.style.justifyContent = "center";
+        art.style.background = "linear-gradient(135deg, var(--background-modifier-border), var(--background-primary))";
+        art.style.position = "relative";
+
+        const tokenFrame = art.createDiv({ cls: "ttrpg-bestiary-token-frame" });
+
+        const imagePath = this.getMonsterImage(entry);
+        if (imagePath) {
+            const img = tokenFrame.createEl("img");
+            img.src = imagePath;
+            img.style.width = "100%";
+            img.style.height = "100%";
+            img.style.objectFit = "cover";
+        } else {
+            const placeholder = tokenFrame.createDiv({ text: "◉" });
+            placeholder.style.fontSize = "40px";
+            placeholder.style.color = "var(--text-muted)";
+            placeholder.style.opacity = "0.4";
+        }
+
+        art.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            new ImageSelectorModal(this.app, this.plugin, entry, () => {
+                this.renderMainContent();
+            }).open();
+        });
+
+        const body = card.createDiv();
+        body.style.padding = "10px";
+        body.createDiv({ cls: "ttrpg-vs__title", text: name });
+
+        const p = (k, v) => {
+            const d = body.createDiv();
+            d.createSpan({ text: k, cls: "ttrpg-vs__meta-text" });
+            d.createEl("br");
+            d.createSpan({ text: String(v || "—") });
+        };
+
+        const sourceRow = body.createDiv();
+        sourceRow.createSpan({ text: "Source", cls: "ttrpg-vs__meta-text" });
+        sourceRow.createEl("br");
+        const chip = sourceRow.createEl("button", {
+            cls: "ttrpg-vs__chip ttrpg-vs__chip--clickable",
+            text: this.plugin.getSourceDisplayLabel(entry.sourceKey, entry.sourceLabel || entry.sourceKey),
+            type: "button"
+        });
+        chip.style.margin = "2px 0";
+        this.plugin.applySourceChipStyle(chip, entry.sourceKey);
+
+        chip.addEventListener("click", (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            this.selectedSources = new Set([entry.sourceKey]);
+            this.renderFiltersTab();
+            this.renderMainContent();
+        });
+
+        chip.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            new SourceChipEditModal(this.app, this.plugin, entry.sourceKey, entry.sourceLabel || entry.sourceKey).open();
+        });
+
+        p("Type", this.formatType(meta.bestiaryType || ""));
+        p("CR", meta.cr);
+        p("Environment", meta.environment);
+
+        const actions = body.createDiv();
+        actions.style.display = "flex";
+        actions.style.gap = "6px";
+        actions.style.marginTop = "8px";
+
+        const add = actions.createEl("button", { text: "Add" });
+        add.addEventListener("click", (e) => {
+            e.stopPropagation();
+            this.addToEncounter(entry);
+        });
+
+        const isFav = this.plugin.isBestiaryFavorite(this.getMonsterKey(entry)) || this.plugin.isBestiaryFavorite(entry.path);
+        const fav = actions.createEl("button", { text: isFav ? "★" : "☆" });
+        fav.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            await this.plugin.toggleBestiaryFavorite(this.getMonsterKey(entry));
+            this.renderMainContent();
+        });
+
+        card.addEventListener("click", (e) => {
+            if (e.target.closest("button") || e.target.closest("input")) return;
+            this.openMonsterReader(entry);
+        });
+
+        // Ctrl/Cmd-hover: trigger Obsidian native page preview
+        const _handleCardHover = (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                this.plugin.app.workspace.trigger("hover-link", {
+                    event: e,
+                    source: "search",
+                    hoverParent: this.parentComponent,
+                    targetEl: card,
+                    linktext: entry.path,
+                    sourcePath: ""
+                });
+            }
+        };
+        card.addEventListener("mouseover", _handleCardHover);
+        card.addEventListener("mousemove", _handleCardHover);
+    }
+
+    renderTable(container, entries) {
+        const table = container.createEl("table", { cls: "ttrpg-bestiary-table" });
+        table.style.width = "100%";
+        table.style.borderCollapse = "collapse";
+        table.style.fontSize = "13px";
+
+        const thead = table.createEl("thead");
+        const headerRow = thead.createEl("tr");
+        headerRow.style.borderBottom = "2px solid var(--background-modifier-border)";
+        headerRow.style.textAlign = "left";
+
+        const sortableHeaders = [
+            { label: "Name", sortKey: "name" },
+            { label: "CR", sortKey: "cr" },
+            { label: "AC", sortKey: "ac" },
+            { label: "HP", sortKey: "hp" },
+            { label: "Type", sortKey: "type" },
+            { label: "Size", sortKey: "size" },
+            { label: "Alignment", sortKey: "alignment" },
+            { label: "Source", sortKey: "source" },
+            { label: "Actions", sortKey: null }
+        ];
+        sortableHeaders.forEach(h => {
+            const th = headerRow.createEl("th");
+            th.style.padding = "8px 6px";
+            th.style.fontWeight = "bold";
+            th.style.color = "var(--text-muted)";
+            if (h.sortKey) {
+                th.style.cursor = "pointer";
+                th.style.userSelect = "none";
+                const arrow = this.sortMode === h.sortKey ? (this.sortDirection === "asc" ? " ▲" : " ▼") : "";
+                th.textContent = h.label + arrow;
+                th.addEventListener("click", () => {
+                    if (this.sortMode === h.sortKey) {
+                        this.sortDirection = this.sortDirection === "asc" ? "desc" : "asc";
+                    } else {
+                        this.sortMode = h.sortKey;
+                        this.sortDirection = "asc";
+                    }
+                    this.renderMainContent();
+                });
+                th.addEventListener("mouseenter", () => { th.style.color = "var(--text-normal)"; });
+                th.addEventListener("mouseleave", () => { th.style.color = "var(--text-muted)"; });
+            } else {
+                th.textContent = h.label;
+            }
+        });
+        const headers = sortableHeaders.map(h => h.label);
+
+        const tbody = table.createEl("tbody");
+
+        if (!entries.length) {
+            const tr = tbody.createEl("tr");
+            const td = tr.createEl("td", { text: "No monsters matching filters." });
+            td.colSpan = headers.length;
+            td.style.padding = "20px";
+            td.style.textAlign = "center";
+            td.style.color = "var(--text-muted)";
+            return;
+        }
+
+        entries.forEach(entry => {
+            const displayMeta = this.getMonsterDisplayMeta(entry);
+            const tr = tbody.createEl("tr");
+            tr.style.borderBottom = "1px solid var(--background-modifier-border)";
+            tr.style.cursor = "pointer";
+
+            tr.addEventListener("mouseenter", () => {
+                tr.style.background = "var(--background-modifier-hover)";
+            });
+            tr.addEventListener("mouseleave", () => {
+                tr.style.background = "transparent";
+            });
+
+            const cols = [
+                displayMeta.name,
+                displayMeta.cr,
+                displayMeta.ac,
+                String(displayMeta.hp || "—"),
+                this.formatType(displayMeta.type),
+                displayMeta.size || "—",
+                displayMeta.alignment || "—",
+                displayMeta.source
+            ];
+
+            cols.forEach((val, idx) => {
+                const td = tr.createEl("td");
+                td.style.padding = "6px 6px";
+                td.style.verticalAlign = "middle";
+                if (idx === 7) {
+                    const chip = td.createEl("button", {
+                        cls: "ttrpg-vs__chip ttrpg-vs__chip--clickable",
+                        text: val,
+                        type: "button"
+                    });
+                    this.plugin.applySourceChipStyle(chip, entry.sourceKey);
+                    chip.addEventListener("click", (e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        this.selectedSources = new Set([entry.sourceKey]);
+                        this.renderFiltersTab();
+                        this.renderMainContent();
+                    });
+                    chip.addEventListener("contextmenu", (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        new SourceChipEditModal(this.app, this.plugin, entry.sourceKey, entry.sourceLabel || entry.sourceKey).open();
+                    });
+                } else {
+                    td.setText(val);
+                    if (idx === 0) {
+                        td.style.fontWeight = "600";
+                        td.style.color = "var(--text-normal)";
+                    }
+                }
+            });
+
+            const tdActions = tr.createEl("td");
+            tdActions.style.padding = "4px 6px";
+            tdActions.style.verticalAlign = "middle";
+
+            const btnWrap = tdActions.createDiv();
+            btnWrap.style.display = "flex";
+            btnWrap.style.gap = "4px";
+
+            const add = btnWrap.createEl("button", { text: "＋" });
+            add.title = "Add to encounter";
+            add.style.padding = "2px 6px";
+            add.addEventListener("click", (e) => {
+                e.stopPropagation();
+                this.addToEncounter(entry);
+            });
+
+            const isFav = this.plugin.isBestiaryFavorite(this.getMonsterKey(entry)) || this.plugin.isBestiaryFavorite(entry.path);
+            const fav = btnWrap.createEl("button", { text: isFav ? "★" : "☆" });
+            fav.title = isFav ? "Remove favorite" : "Favorite";
+            fav.style.padding = "2px 6px";
+            fav.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                await this.plugin.toggleBestiaryFavorite(this.getMonsterKey(entry));
+                this.renderMainContent();
+            });
+
+            tr.addEventListener("click", (e) => {
+                if (e.target.closest("button") || e.target.closest("input")) return;
+                this.openMonsterReader(entry);
+            });
+
+            // Ctrl/Cmd-hover: trigger Obsidian native page preview
+            const _handleRowHover = (e) => {
+                if (e.ctrlKey || e.metaKey) {
+                    this.plugin.app.workspace.trigger("hover-link", {
+                        event: e,
+                        source: "search",
+                        hoverParent: this.parentComponent,
+                        targetEl: tr,
+                        linktext: entry.path,
+                        sourcePath: ""
+                    });
+                }
+            };
+            tr.addEventListener("mouseover", _handleRowHover);
+            tr.addEventListener("mousemove", _handleRowHover);
+        });
+    }
+
+    addToEncounter(entry) {
+        const key = this.getMonsterKey(entry);
+        const found = this.encounter.find(x => x.key === key);
+        if (found) {
+            found.qty++;
+        } else {
+            this.encounter.push({
+                key,
+                name: this.getMonsterName(entry),
+                qty: 1,
+                cr: this.getMonsterMeta(entry).cr,
+                xp: this.getMonsterMeta(entry).xp || 0
+            });
+        }
+        const savedScrollTop = this.encounterColumnEl ? this.encounterColumnEl.scrollTop : 0;
+        this.updateEncounterMonstersDOM();
+        this.updateXPSummary();
+        void this.saveStateToSettings();
+        if (this.encounterColumnEl) {
+            this.encounterColumnEl.scrollTop = savedScrollTop;
+        }
+    }
+
+    setupEncounterDOM() {
+        const el = this.encounterColumnEl;
+        el.empty();
+
+        el.createDiv({ cls: "ttrpg-vs__title", text: "Encounter Builder" });
+
+        el.createDiv({ cls: "ttrpg-vs__label", text: "Encounter name" });
+        this.encounterNameInput = el.createEl("input");
+        this.encounterNameInput.value = this.encounterName;
+        this.encounterNameInput.style.width = "100%";
+        this.encounterNameInput.style.boxSizing = "border-box";
+        this.encounterNameInput.addEventListener("input", () => {
+            this.encounterName = this.encounterNameInput.value;
+            void this.saveStateToSettings();
+        });
+
+        const mathBox = el.createDiv();
+        mathBox.style.marginTop = "10px";
+        mathBox.createDiv({ cls: "ttrpg-vs__label", text: "XP math" });
+
+        this.xpMathSelect = mathBox.createEl("select");
+        stopSelectPropagation(this.xpMathSelect);
+        this.xpMathSelect.style.width = "100%";
+        this.xpMathSelect.style.boxSizing = "border-box";
+
+        [["kpfc", "KPFC / DMG adjusted XP"],
+        ["initiative", "Initiative Tracker / raw XP"],
+        ["raw-threshold", "Raw XP vs thresholds"],
+        ["flee-mortals", "Flee, Mortals! encounter points"]].forEach(([value, label]) => {
+            const option = this.xpMathSelect.createEl("option", { text: label });
+            option.value = value;
+            option.selected = this.xpMathMode === value;
+        });
+        this.xpMathSelect.addEventListener("change", () => {
+            this.xpMathMode = this.xpMathSelect.value;
+            this.updateEncounterMathSettingsDOM();
+            this.updateXPSummary();
+            void this.saveStateToSettings();
+        });
+
+        this.xpMathSettingsContainer = mathBox.createDiv();
+        this.updateEncounterMathSettingsDOM();
+
+        const partyBox = el.createDiv();
+        partyBox.style.marginTop = "12px";
+        partyBox.createDiv({ cls: "ttrpg-vs__label", text: "Party Source" });
+
+        const tracker = this.getTrackerPlugin();
+        const trackerParties = tracker?.data?.parties || [];
+
+        this.partySelect = partyBox.createEl("select");
+        stopSelectPropagation(this.partySelect);
+        this.partySelect.style.width = "100%";
+        this.partySelect.style.boxSizing = "border-box";
+        this.partySelect.style.marginBottom = "8px";
+
+        const customOpt = this.partySelect.createEl("option", { text: "Custom Levels" });
+        customOpt.value = "custom";
+        customOpt.selected = this.selectedPartyName === "custom";
+
+        trackerParties.forEach(p => {
+            const opt = this.partySelect.createEl("option", { text: `Tracker: ${p.name}` });
+            opt.value = p.name;
+            opt.selected = this.selectedPartyName === p.name;
+        });
+
+        this.partySelect.addEventListener("change", () => {
+            this.selectedPartyName = this.partySelect.value;
+            this.refreshPartyFromTracker();
+            this.updatePartyRowsDOM();
+            this.updateXPSummary();
+            void this.saveStateToSettings();
+        });
+
+        this.partyRowsContainer = partyBox.createDiv();
+        this.updatePartyRowsDOM();
+
+        const randomBox = el.createDiv();
+        randomBox.style.marginTop = "14px";
+        randomBox.style.borderTop = "1px solid var(--background-modifier-border)";
+        randomBox.style.paddingTop = "10px";
+        randomBox.createDiv({ cls: "ttrpg-vs__label", text: "Random Generator" });
+
+        this.randSelect = randomBox.createEl("select");
+        stopSelectPropagation(this.randSelect);
+        this.randSelect.style.width = "100%";
+        this.randSelect.style.boxSizing = "border-box";
+        this.randSelect.style.marginBottom = "6px";
+        [["easy", "Easy Encounter"], ["medium", "Medium Encounter"], ["hard", "Hard Encounter"], ["deadly", "Deadly Encounter"]].forEach(([val, label]) => {
+            const o = this.randSelect.createEl("option", { text: label });
+            o.value = val;
+        });
+
+        this.randBtn = randomBox.createEl("button");
+        this.randBtn.style.width = "100%";
+        this.randBtn.style.boxSizing = "border-box";
+        this.randBtn.addEventListener("click", () => {
+            this.randomizeEncounter(this.randSelect.value);
+        });
+
+        const listContainer = el.createDiv();
+        listContainer.style.marginTop = "12px";
+        listContainer.createDiv({ cls: "ttrpg-vs__label", text: "Monsters" });
+        this.encounterMonstersEl = listContainer.createDiv();
+
+        this.xpSummaryEl = el.createDiv();
+        this.xpSummaryEl.style.marginTop = "12px";
+        this.xpSummaryEl.style.borderTop = "1px solid var(--background-modifier-border)";
+        this.xpSummaryEl.style.paddingTop = "8px";
+
+        this.actionButtonsEl = el.createDiv();
+        this.actionButtonsEl.style.display = "flex";
+        this.actionButtonsEl.style.flexWrap = "wrap";
+        this.actionButtonsEl.style.gap = "6px";
+        this.actionButtonsEl.style.marginTop = "10px";
+
+        this.setupActionButtonsDOM();
+    }
+
+    updateEncounterMathSettingsDOM() {
+        const container = this.xpMathSettingsContainer;
+        container.empty();
+
+        if (this.xpMathMode === "kpfc") {
+            const adjustRow = container.createDiv();
+            adjustRow.style.marginTop = "6px";
+            const adjust = adjustRow.createEl("input");
+            adjust.type = "checkbox";
+            adjust.checked = this.includePartySizeAdjustment !== false;
+            adjust.addEventListener("change", () => {
+                this.includePartySizeAdjustment = adjust.checked;
+                this.updateXPSummary();
+                void this.saveStateToSettings();
+            });
+            adjustRow.appendText(" Apply small/large party multiplier adjustment");
+        } else if (this.xpMathMode === "flee-mortals") {
+            const fm = container.createDiv();
+            fm.style.display = "grid";
+            fm.style.gridTemplateColumns = "1fr 1fr";
+            fm.style.gap = "6px";
+            fm.style.marginTop = "6px";
+
+            const diff = fm.createEl("select");
+            stopSelectPropagation(diff);
+            diff.style.width = "100%";
+            diff.style.boxSizing = "border-box";
+            [["trivial", "Trivial (0 EP)"], ["easy", "Easy (1 EP)"], ["standard", "Standard (2 EP)"], ["hard", "Hard (4 EP)"], ["extreme", "Extreme (8 EP)"]].forEach(([v, l]) => {
+                const o = diff.createEl("option", { text: l });
+                o.value = v;
+                o.selected = this.fleeMortalsDifficulty === v;
+            });
+            diff.addEventListener("change", () => {
+                this.fleeMortalsDifficulty = diff.value;
+                this.updateXPSummary();
+                void this.saveStateToSettings();
+            });
+
+            const spent = fm.createEl("input");
+            spent.type = "number";
+            spent.min = "0";
+            spent.value = String(this.fleeMortalsSpent || 0);
+            spent.style.width = "100%";
+            spent.style.boxSizing = "border-box";
+            spent.title = "Encounter points already spent today";
+            spent.addEventListener("input", () => {
+                this.fleeMortalsSpent = Math.max(0, Number(spent.value) || 0);
+                this.updateXPSummary();
+                void this.saveStateToSettings();
+            });
+
+            const budget = fm.createEl("input");
+            budget.type = "number";
+            budget.min = "1";
+            budget.value = String(this.fleeMortalsDayBudget || 8);
+            budget.style.width = "100%";
+            budget.style.boxSizing = "border-box";
+            budget.title = "Daily encounter point budget";
+            budget.addEventListener("input", () => {
+                this.fleeMortalsDayBudget = Math.max(1, Number(budget.value) || 8);
+                this.updateXPSummary();
+                void this.saveStateToSettings();
+            });
+
+            fm.createDiv({ cls: "ttrpg-vs__meta-text", text: "spent today" }).style.fontSize = "11px";
+            fm.createDiv({ cls: "ttrpg-vs__meta-text", text: "daily budget" }).style.fontSize = "11px";
+        }
+    }
+
+    updatePartyRowsDOM() {
+        const container = this.partyRowsContainer;
+        container.empty();
+
+        if (this.selectedPartyName === "custom") {
+            const rows = this.getPartySummary().rows;
+            rows.forEach((row, index) => {
+                const line = container.createDiv();
+                line.style.display = "grid";
+                line.style.gridTemplateColumns = "1fr 1fr 28px";
+                line.style.gap = "6px";
+                line.style.marginTop = "4px";
+
+                const level = line.createEl("input");
+                level.type = "number";
+                level.min = "1";
+                level.max = "20";
+                level.value = String(row.level || 1);
+                level.style.width = "100%";
+                level.style.boxSizing = "border-box";
+                level.title = "Level";
+                level.addEventListener("change", () => {
+                    row.level = Math.max(1, Math.min(20, Number(level.value) || 1));
+                    this.updateXPSummary();
+                    void this.saveStateToSettings();
+                });
+
+                const count = line.createEl("input");
+                count.type = "number";
+                count.min = "0";
+                count.value = String(row.count || 0);
+                count.style.width = "100%";
+                count.style.boxSizing = "border-box";
+                count.title = "Count";
+                count.addEventListener("change", () => {
+                    row.count = Math.max(0, Math.floor(Number(count.value) || 0));
+                    this.updateXPSummary();
+                    void this.saveStateToSettings();
+                });
+
+                const remove = line.createEl("button", { text: "×" });
+                remove.disabled = rows.length <= 1;
+                remove.addEventListener("click", () => {
+                    this.partyRows.splice(index, 1);
+                    this.updatePartyRowsDOM();
+                    this.updateXPSummary();
+                    void this.saveStateToSettings();
+                });
+            });
+            const addParty = container.createEl("button", { text: "+ Add level band" });
+            addParty.style.marginTop = "6px";
+            addParty.style.width = "100%";
+            addParty.style.boxSizing = "border-box";
+            addParty.addEventListener("click", () => {
+                this.partyRows.push({ level: 5, count: 1 });
+                this.updatePartyRowsDOM();
+                this.updateXPSummary();
+                void this.saveStateToSettings();
+            });
+        } else {
+            const tracker = this.getTrackerPlugin();
+            const trackerParties = tracker?.data?.parties || [];
+            const party = trackerParties.find(p => p.name === this.selectedPartyName);
+            if (party && party.players) {
+                const listWrap = container.createDiv({ cls: "ttrpg-vs-synced-players" });
+                listWrap.style.padding = "6px 8px";
+                listWrap.style.background = "var(--background-secondary)";
+                listWrap.style.borderRadius = "6px";
+                listWrap.style.border = "1px solid var(--background-modifier-border)";
+                listWrap.style.fontSize = "12px";
+
+                party.players.forEach(pName => {
+                    const p = tracker.getPlayerByName(pName);
+                    const lvl = p?.level || 5;
+                    const pDiv = listWrap.createDiv();
+                    pDiv.style.display = "flex";
+                    pDiv.style.justifyContent = "space-between";
+                    pDiv.createSpan({ text: pName, cls: "ttrpg-vs-player-name" }).style.fontWeight = "bold";
+                    pDiv.createSpan({ text: `Lvl ${lvl}`, cls: "ttrpg-vs-player-lvl" }).style.color = "var(--text-muted)";
+                });
+
+                const syncBtn = container.createEl("button", { text: "↻ Sync Levels" });
+                syncBtn.style.marginTop = "6px";
+                syncBtn.style.width = "100%";
+                syncBtn.style.boxSizing = "border-box";
+                syncBtn.addEventListener("click", () => {
+                    this.refreshPartyFromTracker();
+                    this.updatePartyRowsDOM();
+                    this.updateXPSummary();
+                    void this.saveStateToSettings();
+                });
+            }
+        }
+    }
+
+    updateEncounterMonstersDOM() {
+        const list = this.encounterMonstersEl;
+        list.empty();
+
+        if (!this.encounter.length) {
+            list.createDiv({ cls: "ttrpg-vs__meta-text", text: "Add monsters from the cards to build an encounter." });
+            return;
+        }
+
+        this.encounter.forEach((m, i) => {
+            const row = list.createDiv();
+            row.style.display = "grid";
+            row.style.gridTemplateColumns = "44px 1fr 28px";
+            row.style.gap = "6px";
+            row.style.alignItems = "center";
+            row.style.marginTop = "4px";
+
+            const qty = row.createEl("input");
+            qty.type = "number";
+            qty.min = "1";
+            qty.value = String(m.qty);
+            qty.style.width = "100%";
+            qty.style.boxSizing = "border-box";
+            qty.addEventListener("change", () => {
+                const savedScrollTop = this.encounterColumnEl ? this.encounterColumnEl.scrollTop : 0;
+                m.qty = Math.max(1, Number(qty.value) || 1);
+                this.updateXPSummary();
+                void this.saveStateToSettings();
+                if (this.encounterColumnEl) {
+                    this.encounterColumnEl.scrollTop = savedScrollTop;
+                }
+            });
+
+            const nameDiv = row.createDiv({ text: m.name + (m.cr ? " (CR " + m.cr + ")" : "") });
+            nameDiv.style.fontSize = "13px";
+            nameDiv.style.wordBreak = "break-word";
+            nameDiv.style.cursor = "pointer";
+            nameDiv.style.textDecoration = "underline dotted";
+            nameDiv.style.textDecorationColor = "var(--text-muted)";
+            nameDiv.title = "Open in reader (click) / Ctrl+hover to preview";
+            nameDiv.addEventListener("click", () => {
+                const entry = this.plugin.getEntries().find(e => this.getMonsterKey(e) === m.key || e.path === m.key);
+                if (entry) this.openMonsterReader(entry);
+            });
+            // Ctrl/Cmd-hover: trigger Obsidian native page preview
+            const _handleEncHover = (e) => {
+                if (e.ctrlKey || e.metaKey) {
+                    const entry = this.plugin.getEntries().find(en => this.getMonsterKey(en) === m.key || en.path === m.key);
+                    if (entry) {
+                        this.plugin.app.workspace.trigger("hover-link", {
+                            event: e,
+                            source: "search",
+                            hoverParent: this.parentComponent,
+                            targetEl: nameDiv,
+                            linktext: entry.path,
+                            sourcePath: ""
+                        });
+                    }
+                }
+            };
+            nameDiv.addEventListener("mouseover", _handleEncHover);
+            nameDiv.addEventListener("mousemove", _handleEncHover);
+
+            const del = row.createEl("button", { text: "×" });
+            del.addEventListener("click", () => {
+                const savedScrollTop = this.encounterColumnEl ? this.encounterColumnEl.scrollTop : 0;
+                this.encounter.splice(i, 1);
+                this.updateEncounterMonstersDOM();
+                this.updateXPSummary();
+                void this.saveStateToSettings();
+                if (this.encounterColumnEl) {
+                    this.encounterColumnEl.scrollTop = savedScrollTop;
+                }
+            });
+        });
+    }
+
+    updateXPSummary() {
+        const el = this.xpSummaryEl;
+        el.empty();
+
+        const math = this.calculateEncounterMath();
+
+        el.createDiv({ cls: "ttrpg-vs__label", text: "Difficulty: " + math.difficulty });
+        el.createDiv({ text: "Players: " + math.party.players + " • Monsters: " + math.monsterCount + " • CR total: " + (Math.round((math.crTotal || 0) * 100) / 100) });
+        el.createDiv({ text: "Raw monster XP: " + this.formatXP(math.rawXP) });
+
+        if (math.mode === "flee-mortals") {
+            el.createDiv({ text: "FM encounter points: " + math.fmPoints + " • Day remaining after this: " + math.fmRemaining + " / " + math.fmBudget });
+            const tipDetails = el.createEl("details");
+            tipDetails.style.marginTop = "4px";
+            const tipSummary = tipDetails.createEl("summary", { cls: "ttrpg-vs__meta-text" });
+            tipSummary.textContent = "MCDM Tip";
+            tipSummary.style.cursor = "pointer";
+            tipSummary.style.fontWeight = "bold";
+            tipDetails.createDiv({
+                cls: "ttrpg-vs__meta-text",
+                text: "Use CR total against the Flee, Mortals! encounter CR-per-character table for your party level and chosen difficulty."
+            });
+        } else {
+            el.createDiv({ text: "Adjusted XP: " + this.formatXP(math.adjustedXP) + " ×" + math.multiplier });
+            el.createDiv({ text: "Per-player XP: " + (math.party.players ? this.formatXP(math.rawXP / math.party.players) : "0") });
+
+            const thresholdsDetails = el.createEl("details");
+            thresholdsDetails.style.marginTop = "4px";
+            const thresholdsSummary = thresholdsDetails.createEl("summary", { cls: "ttrpg-vs__meta-text" });
+            thresholdsSummary.textContent = "View XP Thresholds";
+            thresholdsSummary.style.cursor = "pointer";
+            thresholdsSummary.style.fontWeight = "bold";
+            thresholdsDetails.createDiv({
+                cls: "ttrpg-vs__meta-text",
+                text: "Easy: " + this.formatXP(math.party.thresholds.easy) + " • Medium: " + this.formatXP(math.party.thresholds.medium) + " • Hard: " + this.formatXP(math.party.thresholds.hard) + " • Deadly: " + this.formatXP(math.party.thresholds.deadly)
+            });
+        }
+
+        const calcDetails = el.createEl("details");
+        calcDetails.style.marginTop = "4px";
+        const calcSummary = calcDetails.createEl("summary", { cls: "ttrpg-vs__meta-text" });
+        calcSummary.textContent = "XP Calc: " + math.label;
+        calcSummary.style.cursor = "pointer";
+        calcSummary.style.fontWeight = "bold";
+        calcDetails.createDiv({
+            cls: "ttrpg-vs__meta-text",
+            text: math.detail
+        });
+    }
+
+    setupActionButtonsDOM() {
+        const el = this.actionButtonsEl;
+        el.empty();
+
+        const tracker = this.getTrackerPlugin();
+        if (tracker) {
+            const startBtn = el.createEl("button", { text: "⚔️ Start Combat", cls: "mod-cta" });
+            startBtn.addEventListener("click", () => this.startCombat());
+        }
+
+        const copy = el.createEl("button", { text: "Copy encounter block" });
+        copy.addEventListener("click", () => this.copyEncounterBlock());
+
+        const insert = el.createEl("button", { text: "Insert into active note" });
+        insert.addEventListener("click", () => this.insertEncounterBlock());
+
+        const clear = el.createEl("button", { text: "Clear encounter" });
+        clear.addEventListener("click", () => {
+            this.encounter = [];
+            this.updateEncounterMonstersDOM();
+            this.updateXPSummary();
+            void this.saveStateToSettings();
+        });
+    }
+
+    updateEncounterPanel() {
+        const savedScrollTop = this.encounterColumnEl ? this.encounterColumnEl.scrollTop : 0;
+        this.encounterNameInput.value = this.encounterName;
+        this.xpMathSelect.value = this.xpMathMode;
+        this.updateEncounterMathSettingsDOM();
+        this.updatePartyRowsDOM();
+        this.updateEncounterMonstersDOM();
+        this.updateXPSummary();
+        this.setupActionButtonsDOM();
+        if (this.encounterColumnEl) {
+            this.encounterColumnEl.scrollTop = savedScrollTop;
+        }
+    }
+
+    getXPThresholdsForLevel(level) {
+        const table = {
+            1: [25, 50, 75, 100], 2: [50, 100, 150, 200], 3: [75, 150, 225, 400], 4: [125, 250, 375, 500],
+            5: [250, 500, 750, 1100], 6: [300, 600, 900, 1400], 7: [350, 750, 1100, 1700], 8: [450, 900, 1400, 2100],
+            9: [550, 1100, 1600, 2400], 10: [600, 1200, 1900, 2800], 11: [800, 1600, 2400, 3600], 12: [1000, 2000, 3000, 4500],
+            13: [1100, 2200, 3400, 5100], 14: [1250, 2500, 3800, 5700], 15: [1400, 2800, 4300, 6400], 16: [1600, 3200, 4800, 7200],
+            17: [2000, 3900, 5900, 8800], 18: [2100, 4200, 6300, 9500], 19: [2400, 4900, 7300, 10900], 20: [2800, 5700, 8500, 12700],
+        };
+        return table[Math.max(1, Math.min(20, Number(level) || 1))] || table[1];
+    }
+
+    getPartySummary() {
+        const rows = Array.isArray(this.partyRows) && this.partyRows.length ? this.partyRows : [{ level: 5, count: 4 }];
+        const thresholds = { easy: 0, medium: 0, hard: 0, deadly: 0 };
+        let players = 0, weightedLevel = 0;
+        for (const row of rows) {
+            const level = Math.max(1, Math.min(20, Number(row.level) || 1));
+            const count = Math.max(0, Math.floor(Number(row.count) || 0));
+            const t = this.getXPThresholdsForLevel(level);
+            players += count; weightedLevel += level * count;
+            thresholds.easy += t[0] * count; thresholds.medium += t[1] * count; thresholds.hard += t[2] * count; thresholds.deadly += t[3] * count;
+        }
+        return { rows, players, averageLevel: players ? weightedLevel / players : 0, thresholds };
+    }
+
+    getEncounterMonsterCount() { return this.encounter.reduce((sum, item) => sum + Math.max(0, Math.floor(Number(item.qty) || 0)), 0); }
+
+    getEncounterRawXP() {
+        return this.encounter.reduce((sum, item) => {
+            let xp = Number(item.xp || 0);
+            if (!xp && item.cr && typeof BESTIARY_XP_BY_CR !== "undefined") xp = BESTIARY_XP_BY_CR[String(item.cr)] || 0;
+            return sum + (xp * Math.max(0, Math.floor(Number(item.qty) || 0)));
+        }, 0);
+    }
+
+    crToNumber(cr) {
+        const text = String(cr || "").trim();
+        if (!text) return 0;
+        if (text.includes("/")) { const [a, b] = text.split("/").map(Number); return b ? a / b : 0; }
+        const n = Number(text.replace(/^cr\s*/i, ""));
+        return Number.isFinite(n) ? n : 0;
+    }
+
+    getEncounterCRTotal() { return this.encounter.reduce((sum, item) => sum + this.crToNumber(item.cr) * Math.max(0, Math.floor(Number(item.qty) || 0)), 0); }
+
+    getBaseEncounterMultiplier(monsterCount) { const c = Math.max(0, Number(monsterCount) || 0); if (c <= 1) return 1; if (c === 2) return 1.5; if (c <= 6) return 2; if (c <= 10) return 2.5; if (c <= 14) return 3; return 4; }
+
+    getAdjustedEncounterMultiplier(baseMultiplier, partySize) {
+        if (!this.includePartySizeAdjustment) return baseMultiplier;
+        const multipliers = [1, 1.5, 2, 2.5, 3, 4];
+        let idx = multipliers.indexOf(baseMultiplier); if (idx < 0) idx = multipliers.findIndex((m) => m >= baseMultiplier); if (idx < 0) idx = multipliers.length - 1;
+        if (partySize > 0 && partySize < 3) idx = Math.min(multipliers.length - 1, idx + 1); else if (partySize >= 6) idx = Math.max(0, idx - 1);
+        return multipliers[idx];
+    }
+
+    getFleeMortalsEncounterPoints() {
+        const map = { trivial: 0, easy: 1, standard: 2, hard: 4, extreme: 8 };
+        return map[this.fleeMortalsDifficulty || "standard"] ?? 2;
+    }
+
+    calculateEncounterMath() {
+        const party = this.getPartySummary();
+        const rawXP = this.getEncounterRawXP();
+        const monsterCount = this.getEncounterMonsterCount();
+        const crTotal = this.getEncounterCRTotal();
+        const baseMultiplier = this.getBaseEncounterMultiplier(monsterCount);
+        const mode = this.xpMathMode || "kpfc";
+        let multiplier = 1, adjustedXP = rawXP, compareXP = rawXP, difficulty = "Trivial";
+        let label = "Initiative Tracker / raw XP";
+        let detail = "Uses raw creature XP totals only, matching the lightweight encounter-block workflow.";
+        if (mode === "kpfc") {
+            multiplier = this.getAdjustedEncounterMultiplier(baseMultiplier, party.players); adjustedXP = Math.round(rawXP * multiplier); compareXP = adjustedXP;
+            label = "KPFC / DMG adjusted XP"; detail = "Uses monster-count multiplier and optional party-size adjustment.";
+        } else if (mode === "raw-threshold") {
+            label = "Raw XP vs thresholds"; detail = "Compares raw monster XP to party thresholds without a multiplier.";
+        } else if (mode === "flee-mortals") {
+            const ep = this.getFleeMortalsEncounterPoints();
+            const spent = Math.max(0, Number(this.fleeMortalsSpent || 0));
+            const budget = Math.max(1, Number(this.fleeMortalsDayBudget || 8));
+            label = "Flee, Mortals! encounter points";
+            detail = "Tracks MCDM-style encounter points for the adventuring day. Use the selected FM difficulty as the counter, while CR total helps eyeball the encounter budget from your book/table.";
+            difficulty = formatTitle(this.fleeMortalsDifficulty || "standard");
+            return { mode, label, detail, rawXP, adjustedXP: rawXP, multiplier: 1, baseMultiplier, monsterCount, party, compareXP: rawXP, difficulty, crTotal, fmPoints: ep, fmSpent: spent, fmBudget: budget, fmRemaining: Math.max(0, budget - spent - ep) };
+        }
+        if (party.players <= 0 || rawXP <= 0) difficulty = "None";
+        else if (compareXP >= party.thresholds.deadly) difficulty = "Deadly";
+        else if (compareXP >= party.thresholds.hard) difficulty = "Hard";
+        else if (compareXP >= party.thresholds.medium) difficulty = "Medium";
+        else if (compareXP >= party.thresholds.easy) difficulty = "Easy";
+        return { mode, label, detail, rawXP, adjustedXP, multiplier, baseMultiplier, monsterCount, party, compareXP, difficulty, crTotal, fmPoints: 0, fmSpent: 0, fmBudget: 0, fmRemaining: 0 };
+    }
+
+    formatXP(value) { return Math.round(Number(value) || 0).toLocaleString(); }
+
+    buildEncounterBlock() { const lines = [String.fromCharCode(96, 96, 96) + "encounter", "name: " + (this.encounterName || "Encounter"), "party: none", "creatures:"]; this.encounter.forEach(m => lines.push("  - " + m.qty + ": " + m.name)); lines.push(String.fromCharCode(96, 96, 96)); return lines.join("\n"); }
+    async copyEncounterBlock() { await navigator.clipboard.writeText(this.buildEncounterBlock()); new Notice("Encounter block copied."); }
+    insertEncounterBlock() { const leaf = this.app.workspace.getMostRecentLeaf && this.app.workspace.getMostRecentLeaf(); const editor = leaf && leaf.view && leaf.view.editor; if (editor) { editor.replaceSelection("\n" + this.buildEncounterBlock() + "\n"); new Notice("Encounter block inserted."); } else { new Notice("No active editor found. Use Copy encounter block instead."); } }
+
+    handleBookmarksChanged() {
+        this.renderMainContent();
+    }
+
+    async openMonsterReader(entry) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        const entries = this.plugin.getReaderEntriesForEntry(entry);
+        const initialIndex = Math.max(0, entries.findIndex((candidate) => candidate.path === entry.path));
+
+        if (this.isPopout) {
+            // When bestiary is popped out, open reader in a new tab in main window
+            if (this.plugin.settings.openReaderInPopoutByDefault) {
+                await this.plugin.openReaderPopout(entries, initialIndex);
+            } else {
+                try {
+                    await this.plugin.openReaderNativeTab(entries, initialIndex);
+                } catch (err) {
+                    new TTRPGReaderModal(this.app, this.plugin, entries, initialIndex).open();
+                }
+            }
+        } else {
+            // When bestiary is in a modal, open in a new window (or reuse existing)
+            try {
+                // Try to find an existing TTRPG reader view in a popout window and reuse it
+                let existingLeaf = null;
+                if (this._monsterReaderLeaf) {
+                    // Check if the previously used leaf is still alive
+                    try {
+                        const view = this._monsterReaderLeaf.view;
+                        if (view && view.getViewType && view.getViewType() === TTRPG_READER_VIEW_TYPE) {
+                            existingLeaf = this._monsterReaderLeaf;
+                        }
+                    } catch (_) {
+                        this._monsterReaderLeaf = null;
+                    }
+                }
+                if (!existingLeaf) {
+                    // Search for any existing reader view in a window leaf
+                    this.app.workspace.iterateAllLeaves((leaf) => {
+                        if (existingLeaf) return;
+                        if (leaf.view && leaf.view.getViewType && leaf.view.getViewType() === TTRPG_READER_VIEW_TYPE) {
+                            existingLeaf = leaf;
+                        }
+                    });
+                }
+                if (existingLeaf) {
+                    // Reuse existing window/leaf
+                    const view = existingLeaf.view;
+                    if (view && typeof view.setReaderState === "function") {
+                        view.setReaderState(entries, initialIndex, null, "window");
+                    }
+                    this.app.workspace.setActiveLeaf(existingLeaf, { focus: true });
+                    this._monsterReaderLeaf = existingLeaf;
+                } else {
+                    // Open a new window
+                    const leaf = this.app.workspace.getLeaf("window");
+                    await leaf.setViewState({ type: TTRPG_READER_VIEW_TYPE, active: true });
+                    const view = leaf.view;
+                    if (view && typeof view.setReaderState === "function") {
+                        view.setReaderState(entries, initialIndex, null, "window");
+                    }
+                    this._monsterReaderLeaf = leaf;
+                }
+            } catch (err) {
+                console.error("TTRPG Bestiary reader popout error:", err);
+                new TTRPGReaderModal(this.app, this.plugin, entries, initialIndex).open();
+            }
+        }
+    }
+}
+
+class TTRPGBestiaryModal extends Modal {
     constructor(app, plugin, initialState = null) {
         super(app);
         this.plugin = plugin;
         this.initialState = initialState;
+        this.controller = null;
+        this.hoverPopover = null;
+    }
+
+    onOpen() {
+        this.plugin.registerModal(this);
+        this.modalEl.classList.add("ttrpg-vs-bestiary-modal");
+        this.modalEl.style.width = "min(1680px, 98vw)";
+        this.modalEl.style.height = "min(94vh, 1040px)";
+        this.contentEl.style.height = "100%";
+        this.contentEl.style.overflow = "hidden";
+        this.contentEl.style.padding = "0";
+
+        this.controller = new TTRPGBestiaryController(this.app, this.plugin, {
+            containerEl: this.contentEl,
+            isPopout: false,
+            parentComponent: this,
+            onClose: () => this.close(),
+            initialState: this.initialState
+        });
+        this.controller.build();
+    }
+
+    onClose() {
+        if (this.plugin.settings.saveLastBestiarySearch && this.controller) {
+            const snap = this.controller.getStateSnapshot();
+            this.plugin._cachedBestiarySearchState = snap;
+            this.plugin.settings.lastBestiarySearchState = snap;
+            void this.plugin.saveSettings(false);
+        }
+        this.plugin.unregisterModal(this);
+        this.controller = null;
+    }
+
+    handleBookmarksChanged() {
+        if (this.controller) {
+            this.controller.handleBookmarksChanged();
+        }
+    }
+
+    refreshFromPlugin() {
+        if (this.controller) {
+            this.controller.handleBookmarksChanged();
+        }
+    }
+}
+
+class TTRPGSpellbookController {
+    constructor(app, plugin, options) {
+        this.app = app;
+        this.plugin = plugin;
+        this.containerEl = options.containerEl;
+        this.isPopout = options.isPopout || false;
+        this.onClose = options.onClose;
+        this.parentComponent = options.parentComponent || plugin;
+        this.initialState = options.initialState || null;
 
         this.query = "";
-        this.selectedLevels  = new Set();
+        this.selectedLevels = new Set();
         this.selectedSchools = new Set();
         this.selectedClasses = new Set();
         this.selectedSources = new Set();
         this.sortMode = "level";
         this.showFavoritesOnly = false;
-        this.ritualOnly        = false;
-        this.concOnly          = false;
+        this.ritualOnly = false;
+        this.concOnly = false;
         this.selectedIndex = 0;
         this.visibleEntries = [];
         this.renderedItems = new Map();
@@ -4526,15 +7860,11 @@ class TTRPGSpellbookModal extends Modal {
         this.refreshResultsDebounced = debounce(() => this.refreshResults(true), 25, false);
     }
 
-    onOpen() {
-        this.plugin.registerModal(this);
-        this.modalEl.classList.add("ttrpg-sb-modal", "ttrpg-vs-modal");
-        this.contentEl.empty();
-        this.contentEl.classList.add("ttrpg-vs");
+    build() {
+        this.containerEl.empty();
+        this.containerEl.classList.add("ttrpg-vs");
 
-        this.titleEl.setText("Spellbook");
-
-        const toolbarEl = this.contentEl.createDiv({ cls: "ttrpg-vs__toolbar" });
+        const toolbarEl = this.containerEl.createDiv({ cls: "ttrpg-vs__toolbar" });
 
         // ── Search ────────────────────────────────────────────────────────────
         this.inputEl = toolbarEl.createEl("input", { cls: "ttrpg-vs__search" });
@@ -4549,7 +7879,7 @@ class TTRPGSpellbookModal extends Modal {
         this.inputEl.addEventListener("keydown", (event) => {
             if (!this.visibleEntries.length) return;
             if (event.key === "ArrowDown") { event.preventDefault(); this.setSelectedIndex(this.selectedIndex + 1, true); return; }
-            if (event.key === "ArrowUp")   { event.preventDefault(); this.setSelectedIndex(this.selectedIndex - 1, true); return; }
+            if (event.key === "ArrowUp") { event.preventDefault(); this.setSelectedIndex(this.selectedIndex - 1, true); return; }
             if (event.key === "Enter") {
                 event.preventDefault();
                 const sel = this.visibleEntries[this.selectedIndex];
@@ -4579,7 +7909,7 @@ class TTRPGSpellbookModal extends Modal {
         this.levelButtonEl.type = "button";
         this.levelButtonEl.addEventListener("click", (e) => {
             e.preventDefault(); e.stopPropagation();
-            new SourcePickerModal(this.app, this.plugin.getSpellLevelOptions(), new Set(this.selectedLevels), (keys) => {
+            new SourcePickerModal(this.app, this.plugin, () => this.plugin.getSpellLevelOptions(), new Set(this.selectedLevels), (keys) => {
                 this.selectedLevels = keys; this.updateLevelButton(); this.selectedIndex = 0; this.refreshResults(true);
             }, "Filter by Level").open();
         });
@@ -4591,7 +7921,7 @@ class TTRPGSpellbookModal extends Modal {
         this.schoolButtonEl.type = "button";
         this.schoolButtonEl.addEventListener("click", (e) => {
             e.preventDefault(); e.stopPropagation();
-            new SourcePickerModal(this.app, this.plugin.getSpellSchoolOptions(), new Set(this.selectedSchools), (keys) => {
+            new SourcePickerModal(this.app, this.plugin, () => this.plugin.getSpellSchoolOptions(), new Set(this.selectedSchools), (keys) => {
                 this.selectedSchools = keys; this.updateSchoolButton(); this.selectedIndex = 0; this.refreshResults(true);
             }, "Filter by School").open();
         });
@@ -4603,7 +7933,7 @@ class TTRPGSpellbookModal extends Modal {
         this.classButtonEl.type = "button";
         this.classButtonEl.addEventListener("click", (e) => {
             e.preventDefault(); e.stopPropagation();
-            new SourcePickerModal(this.app, this.plugin.getSpellClassOptions(), new Set(this.selectedClasses), (keys) => {
+            new SourcePickerModal(this.app, this.plugin, () => this.plugin.getSpellClassOptions(), new Set(this.selectedClasses), (keys) => {
                 this.selectedClasses = keys; this.updateClassButton(); this.selectedIndex = 0; this.refreshResults(true);
             }, "Filter by Class").open();
         });
@@ -4615,7 +7945,7 @@ class TTRPGSpellbookModal extends Modal {
         this.sourceButtonEl.type = "button";
         this.sourceButtonEl.addEventListener("click", (e) => {
             e.preventDefault(); e.stopPropagation();
-            new SourcePickerModal(this.app, this._getSpellSourceOptions(), new Set(this.selectedSources), (keys) => {
+            new SourcePickerModal(this.app, this.plugin, () => this._getSpellSourceOptions(), new Set(this.selectedSources), (keys) => {
                 this.selectedSources = keys; this.updateSourceButton(); this.selectedIndex = 0; this.refreshResults(true);
             }, "Filter by Source").open();
         });
@@ -4661,7 +7991,7 @@ class TTRPGSpellbookModal extends Modal {
         this.clearButtonEl.type = "button";
         this.clearButtonEl.title = "Clear all filters";
         this.clearButtonEl.addEventListener("click", () => {
-            this.selectedLevels  = new Set(); this.selectedSchools = new Set();
+            this.selectedLevels = new Set(); this.selectedSchools = new Set();
             this.selectedClasses = new Set(); this.selectedSources = new Set();
             this.showFavoritesOnly = false; this.ritualOnly = false; this.concOnly = false;
             this.query = ""; if (this.inputEl) this.inputEl.value = "";
@@ -4672,25 +8002,70 @@ class TTRPGSpellbookModal extends Modal {
             this.selectedIndex = 0; this.refreshResults(true);
         });
 
-        const presetRow = toolbarEl.createDiv({ cls: "ttrpg-vs__button-row" });
+        const doc = this.containerEl.ownerDocument;
+        const presetRow = this.containerEl.createDiv({ cls: "ttrpg-vs__button-row" });
         const spellPresetSelect = presetRow.createEl("select", { cls: "ttrpg-vs__select" });
         spellPresetSelect.style.width = "auto";
-        spellPresetSelect.appendChild(Object.assign(document.createElement("option"), { value: "", textContent: "Preset…" }));
-        for (const preset of this.plugin.getFilterPresets()) { const opt=document.createElement("option"); opt.value=preset.id; opt.textContent=preset.name; spellPresetSelect.appendChild(opt); }
-        spellPresetSelect.addEventListener("change", () => { const preset=this.plugin.getFilterPresets().find((p)=>p.id===spellPresetSelect.value); if(!preset) return; const validSources=new Set(this._getSpellSourceOptions().map((o)=>o.key)); this.selectedSources=new Set((preset.sources||[]).map(normalizeKey).filter((k)=>validSources.has(k))); this.updateSourceButton(); this.selectedIndex=0; this.refreshResults(true); });
+        spellPresetSelect.appendChild(Object.assign(doc.createElement("option"), { value: "", textContent: "Preset…" }));
+        for (const preset of this.plugin.getFilterPresets()) {
+            const opt = doc.createElement("option");
+            opt.value = preset.id;
+            opt.textContent = preset.name;
+            spellPresetSelect.appendChild(opt);
+        }
+        spellPresetSelect.addEventListener("change", () => {
+            const preset = this.plugin.getFilterPresets().find((p) => p.id === spellPresetSelect.value);
+            if (!preset) return;
+            const validSources = new Set(this._getSpellSourceOptions().map((o) => o.key));
+            this.selectedSources = new Set((preset.sources || []).map(normalizeKey).filter((k) => validSources.has(k)));
+            this.updateSourceButton();
+            this.selectedIndex = 0;
+            this.refreshResults(true);
+        });
+
+        if (!this.isPopout) {
+            const popoutBtn = presetRow.createEl("button", {
+                cls: "ttrpg-vs__toolbutton",
+                text: "⤢ Pop-out",
+            });
+            popoutBtn.type = "button";
+            popoutBtn.title = "Open Spellbook in a pop-out window";
+            popoutBtn.addEventListener("click", async () => {
+                const snap = this.getStateSnapshot();
+                snap.isPopout = true;
+                if (this.onClose) this.onClose();
+                await this.plugin.openSpellbookPopout(snap);
+            });
+        } else {
+            const popinBtn = presetRow.createEl("button", {
+                cls: "ttrpg-vs__toolbutton",
+                text: "⤡ Pop-in",
+            });
+            popinBtn.type = "button";
+            popinBtn.title = "Move Spellbook back to main window";
+            popinBtn.addEventListener("click", () => {
+                const snap = this.getStateSnapshot();
+                snap.forceModal = true;
+                snap.isPopout = false;
+                if (this.onClose) this.onClose();
+                this.plugin.openSpellbookModal(snap);
+            });
+        }
 
         // ── Results area ──────────────────────────────────────────────────────
-        this.statsEl    = this.contentEl.createDiv({ cls: "ttrpg-vs__stats" });
-        this.viewportEl = this.contentEl.createDiv({ cls: "ttrpg-vs__viewport" });
-        this.canvasEl   = this.viewportEl.createDiv({ cls: "ttrpg-vs__canvas" });
-        this.emptyEl    = this.viewportEl.createDiv({ cls: "ttrpg-vs__empty" });
+        this.statsEl = this.containerEl.createDiv({ cls: "ttrpg-vs__stats" });
+        this.viewportEl = this.containerEl.createDiv({ cls: "ttrpg-vs__viewport" });
+        this.canvasEl = this.viewportEl.createDiv({ cls: "ttrpg-vs__canvas" });
+        this.emptyEl = this.viewportEl.createDiv({ cls: "ttrpg-vs__empty" });
         this.emptyEl.setText("No spells found. Try adjusting filters or rebuilding the index.");
         this.viewportEl.addEventListener("scroll", () => this.scheduleVirtualRender(), { passive: true });
         this._vpHeight = 0;
         if (typeof ResizeObserver !== "undefined") {
             this._viewportRO = new ResizeObserver(entries => {
-                this._vpHeight = entries[0].contentRect.height;
-                this.scheduleVirtualRender();
+                if (entries[0] && this.viewportEl) {
+                    this._vpHeight = entries[0].contentRect.height;
+                    this.scheduleVirtualRender();
+                }
             });
             this._viewportRO.observe(this.viewportEl);
         }
@@ -4698,28 +8073,27 @@ class TTRPGSpellbookModal extends Modal {
         this.applyInitialState();
         this.updateLevelButton(); this.updateSchoolButton(); this.updateClassButton(); this.updateSourceButton();
         this.refreshResults(false);
-        window.setTimeout(() => this.inputEl.focus(), 0);
+        window.setTimeout(() => { if (this.inputEl) this.inputEl.focus(); }, 0);
     }
 
-    onClose() {
+    destroy() {
         if (this._viewportRO) { this._viewportRO.disconnect(); this._viewportRO = null; }
-        this.plugin.unregisterModal(this);
         this.renderedItems.clear();
-        this.contentEl.empty();
+        this.containerEl.empty();
     }
 
     applyInitialState() {
         if (!this.initialState) return;
         this.query = this.initialState.query || "";
         if (this.inputEl) this.inputEl.value = this.query;
-        if (Array.isArray(this.initialState.selectedLevels))  this.selectedLevels  = new Set(this.initialState.selectedLevels);
+        if (Array.isArray(this.initialState.selectedLevels)) this.selectedLevels = new Set(this.initialState.selectedLevels);
         if (Array.isArray(this.initialState.selectedSchools)) this.selectedSchools = new Set(this.initialState.selectedSchools);
         if (Array.isArray(this.initialState.selectedClasses)) this.selectedClasses = new Set(this.initialState.selectedClasses);
         if (Array.isArray(this.initialState.selectedSources)) this.selectedSources = new Set(this.initialState.selectedSources);
         if (this.initialState.sortMode) { this.sortMode = this.initialState.sortMode; if (this.sortSelectEl) this.sortSelectEl.value = this.sortMode; }
         if (this.initialState.showFavoritesOnly) { this.showFavoritesOnly = true; if (this.favBtnEl) this.favBtnEl.classList.add("is-active"); }
         if (this.initialState.ritualOnly) { this.ritualOnly = true; if (this.ritualBtnEl) this.ritualBtnEl.classList.add("is-active"); }
-        if (this.initialState.concOnly)   { this.concOnly   = true; if (this.concBtnEl)   this.concBtnEl.classList.add("is-active"); }
+        if (this.initialState.concOnly) { this.concOnly = true; if (this.concBtnEl) this.concBtnEl.classList.add("is-active"); }
         if (this.initialState.scrollTop) {
             requestAnimationFrame(() => requestAnimationFrame(() => {
                 if (this.viewportEl) this.viewportEl.scrollTop = this.initialState.scrollTop;
@@ -4727,23 +8101,28 @@ class TTRPGSpellbookModal extends Modal {
         }
     }
 
+    loadState(state) {
+        this.initialState = state;
+        this.applyInitialState();
+    }
+
     getStateSnapshot() {
         return {
             mode: "spellbook",
+            isPopout: this.isPopout,
             query: this.query,
-            selectedLevels:    Array.from(this.selectedLevels),
-            selectedSchools:   Array.from(this.selectedSchools),
-            selectedClasses:   Array.from(this.selectedClasses),
-            selectedSources:   Array.from(this.selectedSources),
-            sortMode:          this.sortMode,
+            selectedLevels: Array.from(this.selectedLevels),
+            selectedSchools: Array.from(this.selectedSchools),
+            selectedClasses: Array.from(this.selectedClasses),
+            selectedSources: Array.from(this.selectedSources),
+            sortMode: this.sortMode,
             showFavoritesOnly: this.showFavoritesOnly,
-            ritualOnly:        this.ritualOnly,
-            concOnly:          this.concOnly,
-            scrollTop:         this.viewportEl ? this.viewportEl.scrollTop : 0,
+            ritualOnly: this.ritualOnly,
+            concOnly: this.concOnly,
+            scrollTop: this.viewportEl ? this.viewportEl.scrollTop : 0,
         };
     }
 
-    // Called by plugin.notifyModals() when bookmarks or index change
     refreshFromPlugin() {
         this.updateLevelButton(); this.updateSchoolButton(); this.updateClassButton(); this.updateSourceButton();
         this.refreshResults(false);
@@ -4753,11 +8132,16 @@ class TTRPGSpellbookModal extends Modal {
 
     _getSpellSourceOptions() {
         const map = new Map();
-        for (const entry of this.plugin.getEntries()) {
+        for (const entry of this.plugin.getSpellEntries()) {
             if (entry.typeKey !== "spell" || !entry.sourceKey || !entry.sourceLabel) continue;
             const ex = map.get(entry.sourceKey);
             if (ex) ex.count++;
-            else map.set(entry.sourceKey, { key: entry.sourceKey, label: entry.sourceLabel, count: 1 });
+            else map.set(entry.sourceKey, {
+                key: entry.sourceKey,
+                label: this.plugin.getSourceDisplayLabel(entry.sourceKey, entry.sourceLabel),
+                rawLabel: entry.sourceLabel,
+                count: 1
+            });
         }
         return Array.from(map.values()).sort((a, b) => COLLATOR.compare(a.label, b.label));
     }
@@ -4796,29 +8180,25 @@ class TTRPGSpellbookModal extends Modal {
 
     refreshResults(resetScroll) {
         const titleOnly = !!this.plugin.settings.searchTitleOnly;
-        let entries = this.plugin.getEntries().filter((e) => e.typeKey === "spell");
+        let entries = this.plugin.getSpellEntries();
         const total = entries.length;
 
-        // Spellbook-isolated favorites
         if (this.showFavoritesOnly) {
             entries = entries.filter((e) => this.plugin.isSpellBookmarked(e.path));
         }
 
-        // Level / school / class / source filters
         entries = entries.filter((entry) => {
             const sm = entry.spellMeta;
             if (this.selectedLevels.size > 0 && (!sm || sm.level == null || !this.selectedLevels.has(String(sm.level)))) return false;
-            if (this.selectedSchools.size > 0 && (!sm || !sm.school || !this.selectedSchools.has(normalizeKey(sm.school)))) return false;
-            if (this.selectedClasses.size > 0 && (!sm || !sm.classes.some((c) => this.selectedClasses.has(normalizeKey(c))))) return false;
+            if (this.selectedSchools.size > 0 && (!sm || !sm._normalizedSchoolKey || !this.selectedSchools.has(sm._normalizedSchoolKey))) return false;
+            if (this.selectedClasses.size > 0 && (!sm || !sm._normalizedClassesKeys || !sm._normalizedClassesKeys.some((c) => this.selectedClasses.has(c)))) return false;
             if (this.selectedSources.size > 0 && !this.selectedSources.has(entry.sourceKey)) return false;
             return true;
         });
 
-        // Boolean flags
         if (this.ritualOnly) entries = entries.filter((e) => e.spellMeta?.ritual === true);
-        if (this.concOnly)   entries = entries.filter((e) => e.spellMeta?.concentration === true);
+        if (this.concOnly) entries = entries.filter((e) => e.spellMeta?.concentration === true);
 
-        // Text search — score once and reuse for sort
         let preScored = null;
         const trimmedQuery = this.query.trim();
         if (trimmedQuery) {
@@ -4841,18 +8221,18 @@ class TTRPGSpellbookModal extends Modal {
         const favCount = this.plugin.getSpellBookmarkedPaths().length;
         const favLabel = favCount > 0 ? ` • ★ ${favCount} saved` : "";
         this.statsEl.textContent = `${entries.length} matching • ${this.visibleEntries.length} shown • ${total} total${favLabel}`;
-        this.canvasEl.style.height  = `${this.visibleEntries.length * RESULT_ROW_HEIGHT}px`;
+        this.canvasEl.style.height = `${this.visibleEntries.length * RESULT_ROW_HEIGHT}px`;
         this.canvasEl.style.display = this.visibleEntries.length ? "block" : "none";
-        this.emptyEl.style.display  = this.visibleEntries.length ? "none" : "block";
+        this.emptyEl.style.display = this.visibleEntries.length ? "none" : "block";
         this.scheduleVirtualRender(true);
     }
 
     _compareByMode(a, b) {
         switch (this.sortMode) {
-            case "level":  { const la = a.spellMeta?.level ?? 99, lb = b.spellMeta?.level ?? 99; return la - lb || COLLATOR.compare(a.displayName, b.displayName); }
+            case "level": { const la = a.spellMeta?.level ?? 99, lb = b.spellMeta?.level ?? 99; return la - lb || COLLATOR.compare(a.displayName, b.displayName); }
             case "school": return COLLATOR.compare(a.spellMeta?.school || "zzz", b.spellMeta?.school || "zzz") || COLLATOR.compare(a.displayName, b.displayName);
             case "source": return COLLATOR.compare(a.sourceLabel || "zzz", b.sourceLabel || "zzz") || COLLATOR.compare(a.displayName, b.displayName);
-            default:       return COLLATOR.compare(a.displayName, b.displayName);
+            default: return COLLATOR.compare(a.displayName, b.displayName);
         }
     }
 
@@ -4873,7 +8253,8 @@ class TTRPGSpellbookModal extends Modal {
         if (forceFullRebuild) this._needsFullRebuild = true;
         if (this.virtualRenderQueued) return;
         this.virtualRenderQueued = true;
-        requestAnimationFrame(() => { this.virtualRenderQueued = false; this.renderVirtualRows(); });
+        const win = this.containerEl.ownerDocument.defaultView || window;
+        win.requestAnimationFrame(() => { this.virtualRenderQueued = false; this.renderVirtualRows(); });
     }
 
     renderVirtualRows() {
@@ -4889,7 +8270,7 @@ class TTRPGSpellbookModal extends Modal {
         const vpH = this._vpHeight || this.viewportEl.clientHeight || this.viewportEl.getBoundingClientRect().height || 600;
         const sTop = this.viewportEl.scrollTop;
         const start = Math.max(0, Math.floor(sTop / RESULT_ROW_HEIGHT) - RESULT_OVERSCAN);
-        const end   = Math.min(this.visibleEntries.length, Math.ceil((sTop + vpH) / RESULT_ROW_HEIGHT) + RESULT_OVERSCAN);
+        const end = Math.min(this.visibleEntries.length, Math.ceil((sTop + vpH) / RESULT_ROW_HEIGHT) + RESULT_OVERSCAN);
 
         if (needsFullRebuild) {
             this.renderedItems.clear();
@@ -4900,7 +8281,8 @@ class TTRPGSpellbookModal extends Modal {
             }
         }
 
-        const frag = document.createDocumentFragment();
+        const doc = this.containerEl.ownerDocument;
+        const frag = doc.createDocumentFragment();
         for (let i = start; i < end; i++) {
             if (this.renderedItems.has(i)) continue;
             const el = this.createSpellResultElement(this.visibleEntries[i], i);
@@ -4911,29 +8293,43 @@ class TTRPGSpellbookModal extends Modal {
     }
 
     createSpellResultElement(entry, index) {
-        const itemEl = document.createElement("div");
+        const doc = this.containerEl.ownerDocument;
+        const itemEl = doc.createElement("div");
         itemEl.className = "ttrpg-vs__result";
         if (index === this.selectedIndex) itemEl.classList.add("is-selected");
         itemEl.addEventListener("mouseenter", () => this.setSelectedIndex(index, false));
         itemEl.addEventListener("click", () => void this.openEntry(entry));
 
-        const topEl  = document.createElement("div"); topEl.className  = "ttrpg-vs__top";
-        const mainEl = document.createElement("div"); mainEl.className = "ttrpg-vs__main";
+        // Ctrl/Cmd-hover: trigger Obsidian native page preview
+        const handleHover = (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                this.plugin.app.workspace.trigger("hover-link", {
+                    event: e,
+                    source: "search",
+                    hoverParent: this.parentComponent,
+                    targetEl: itemEl,
+                    linktext: entry.path,
+                    sourcePath: ""
+                });
+            }
+        };
+        itemEl.addEventListener("mouseover", handleHover);
+        itemEl.addEventListener("mousemove", handleHover);
 
-        // Name
-        const titleEl = document.createElement("div"); titleEl.className = "ttrpg-vs__title";
-        const nameEl  = document.createElement("span"); nameEl.className = "ttrpg-vs__title-piece ttrpg-vs__title-chapter";
+        const topEl = doc.createElement("div"); topEl.className = "ttrpg-vs__top";
+        const mainEl = doc.createElement("div"); mainEl.className = "ttrpg-vs__main";
+
+        const titleEl = doc.createElement("div"); titleEl.className = "ttrpg-vs__title";
+        const nameEl = doc.createElement("span"); nameEl.className = "ttrpg-vs__title-piece ttrpg-vs__title-chapter";
         nameEl.innerHTML = highlightMatch(entry.displayName, this.query);
         titleEl.appendChild(nameEl); mainEl.appendChild(titleEl);
 
-        // Level chip + school badge (clickable) + source chip (clickable)
-        const metaEl = document.createElement("div"); metaEl.className = "ttrpg-vs__meta";
+        const metaEl = doc.createElement("div"); metaEl.className = "ttrpg-vs__meta";
         const sm = entry.spellMeta;
         if (sm?.level != null) {
-            const chip = document.createElement("span");
+            const chip = doc.createElement("span");
             chip.className = `ttrpg-sb__level-chip ttrpg-sb__level-${sm.level}`;
             chip.textContent = formatSpellLevel(sm.level);
-            // Click level chip to filter
             chip.style.cursor = "pointer"; chip.title = `Filter to ${formatSpellLevel(sm.level)}`;
             chip.addEventListener("click", (e) => {
                 e.preventDefault(); e.stopPropagation();
@@ -4943,8 +8339,8 @@ class TTRPGSpellbookModal extends Modal {
             metaEl.appendChild(chip);
         }
         if (sm?.school) {
-            const badge = document.createElement("button"); badge.type = "button";
-            badge.className = "ttrpg-vs__badge ttrpg-vs__badge--clickable";
+            const badge = doc.createElement("button"); badge.type = "button";
+            badge.className = "ttrpg-vs__badge ttrpg-vs__badge--clickable ttrpg-sb__school-badge--" + normalizeKey(sm.school);
             badge.textContent = sm.school; badge.title = `Filter by school: ${sm.school}`;
             badge.addEventListener("click", (e) => {
                 e.preventDefault(); e.stopPropagation();
@@ -4954,7 +8350,7 @@ class TTRPGSpellbookModal extends Modal {
             metaEl.appendChild(badge);
         }
         if (entry.sourceLabel) {
-            const chip = document.createElement("button"); chip.type = "button";
+            const chip = doc.createElement("button"); chip.type = "button";
             chip.className = "ttrpg-vs__chip ttrpg-vs__chip--clickable";
             const sourceDisplayLabel = this.plugin.getSourceDisplayLabel(entry.sourceKey, entry.sourceLabel);
             chip.textContent = sourceDisplayLabel; chip.title = `Filter by source: ${sourceDisplayLabel} (right-click to edit chip)`;
@@ -4969,12 +8365,11 @@ class TTRPGSpellbookModal extends Modal {
         }
         mainEl.appendChild(metaEl);
 
-        // Classes • Ritual • Concentration
-        const classesEl = document.createElement("div"); classesEl.className = "ttrpg-vs__meta-text";
+        const classesEl = doc.createElement("div"); classesEl.className = "ttrpg-vs__meta-text";
         if (sm) {
             const parts = [];
             if (sm.classes.length) parts.push(sm.classes.join(", "));
-            if (sm.ritual)        parts.push("Ritual");
+            if (sm.ritual) parts.push("Ritual");
             if (sm.concentration) parts.push("Concentration");
             classesEl.textContent = parts.join(" • ") || (entry.aliases[0] || "");
         } else {
@@ -4982,9 +8377,8 @@ class TTRPGSpellbookModal extends Modal {
         }
         mainEl.appendChild(classesEl);
 
-        // Right: ★ spellbook-isolated bookmark
-        const rightEl = document.createElement("div"); rightEl.className = "ttrpg-vs__right";
-        const starEl  = document.createElement("button"); starEl.type = "button"; starEl.className = "ttrpg-vs__star";
+        const rightEl = doc.createElement("div"); rightEl.className = "ttrpg-vs__right";
+        const starEl = doc.createElement("button"); starEl.type = "button"; starEl.className = "ttrpg-vs__star";
         const refreshStar = () => {
             const on = this.plugin.isSpellBookmarked(entry.path);
             starEl.textContent = on ? "★" : "☆";
@@ -4996,13 +8390,12 @@ class TTRPGSpellbookModal extends Modal {
             e.preventDefault(); e.stopPropagation();
             await this.plugin.toggleSpellBookmark(entry.path);
             refreshStar();
-            // If favorites filter is on, re-render to reflect removal
             if (this.showFavoritesOnly) this.refreshResults(false);
         });
         rightEl.appendChild(starEl);
 
         topEl.appendChild(mainEl); topEl.appendChild(rightEl);
-        const pathEl = document.createElement("div"); pathEl.className = "ttrpg-vs__path";
+        const pathEl = doc.createElement("div"); pathEl.className = "ttrpg-vs__path";
         pathEl.innerHTML = highlightMatch(entry.path, this.query);
         itemEl.appendChild(topEl); itemEl.appendChild(pathEl);
         return itemEl;
@@ -5024,31 +8417,145 @@ class TTRPGSpellbookModal extends Modal {
     }
 
     async openEntry(entry) {
+        await new Promise(resolve => setTimeout(resolve, 50));
         const entries = this.plugin.getReaderEntriesForEntry(entry);
-        const idx     = Math.max(0, entries.findIndex((e) => e.path === entry.path));
-        const snap    = this.getStateSnapshot();
-        if (this.plugin.settings.openReaderInPopoutByDefault) { this.close(); await this.plugin.openReaderPopout(entries, idx, snap); return; }
-        const reader  = new TTRPGReaderModal(this.app, this.plugin, entries, idx, snap);
-        this.close();
-        reader.open();
+        const idx = Math.max(0, entries.findIndex((e) => e.path === entry.path));
+        const snap = this.getStateSnapshot();
+        if (this.isPopout) {
+            if (this.plugin.settings.openReaderInPopoutByDefault) {
+                await this.plugin.openReaderPopout(entries, idx, snap);
+            } else {
+                try {
+                    await this.plugin.openReaderNativeTab(entries, idx, snap);
+                } catch (err) {
+                    new TTRPGReaderModal(this.app, this.plugin, entries, idx, snap).open();
+                }
+            }
+        } else {
+            // In modal
+            if (this.plugin.settings.openReaderInPopoutByDefault) {
+                if (this.onClose) this.onClose();
+                await this.plugin.openReaderPopout(entries, idx, snap);
+            } else {
+                const reader = new TTRPGReaderModal(this.app, this.plugin, entries, idx, snap);
+                if (this.onClose) this.onClose();
+                reader.open();
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TTRPGReaderModal – thin wrapper: hosts ReaderEngine inside a blocking Modal
+// ─────────────────────────────────────────────────────────────────────────────
+class TTRPGReaderModal extends Modal {
+    constructor(app, plugin, entries, initialIndex = 0, searchState = null) {
+        super(app);
+        this.plugin = plugin;
+        this.entries = entries || [];
+        this.initialIndex = initialIndex;
+        this.searchState = searchState;
+        this._engine = null;
+        this.hoverPopover = null;
+    }
+
+    onOpen() {
+        this.plugin.registerModal(this);
+        this.modalEl.classList.add("ttrpg-reader-modal");
+        this.contentEl.empty();
+        this.contentEl.classList.add("ttrpg-reader");
+        this._engine = new ReaderEngine(this.app, this.plugin, {
+            setTitle: (text) => this.titleEl.setText(text),
+            goBack: (state) => { this.close(); this.plugin.openSearchModal(state); },
+            closeReader: () => this.close(),
+            isPopout: false,
+        });
+        this._engine.build(this.contentEl, this.entries, this.initialIndex, this.searchState);
+    }
+
+    onClose() {
+        if (this._engine) { this._engine.destroy(); this._engine = null; }
+        this.plugin.unregisterModal(this);
+        this.contentEl.empty();
+    }
+
+    handleBookmarksChanged() { if (this._engine) this._engine.handleBookmarksChanged(); }
+    refreshFromPlugin() {
+        if (this._engine) this._engine.refreshFromPlugin();
+    }
+}
+
+class TTRPGSpellbookModal extends Modal {
+    constructor(app, plugin, initialState = null) {
+        super(app);
+        this.plugin = plugin;
+        this.initialState = initialState;
+        this.controller = null;
+        this.hoverPopover = null;
+    }
+
+    onOpen() {
+        this.plugin.registerModal(this);
+        this.modalEl.classList.add("ttrpg-sb-modal", "ttrpg-vs-modal");
+        this.contentEl.empty();
+        this.contentEl.classList.add("ttrpg-vs");
+        this.titleEl.setText("Spellbook");
+
+        this.controller = new TTRPGSpellbookController(this.app, this.plugin, {
+            containerEl: this.contentEl,
+            isPopout: false,
+            parentComponent: this,
+            onClose: () => this.close(),
+            initialState: this.initialState
+        });
+        this.controller.build();
+    }
+
+    onClose() {
+        if (this.plugin.settings.saveLastSpellbookSearch && this.controller) {
+            const snap = this.controller.getStateSnapshot();
+            this.plugin._cachedSpellbookSearchState = snap;
+            this.plugin.settings.lastSpellbookSearchState = snap;
+            void this.plugin.saveSettings(false);
+        }
+        if (this.controller) {
+            this.controller.destroy();
+            this.controller = null;
+        }
+        this.plugin.unregisterModal(this);
+    }
+
+    handleBookmarksChanged() {
+        if (this.controller) {
+            this.controller.handleBookmarksChanged();
+        }
+    }
+
+    refreshFromPlugin() {
+        if (this.controller) {
+            this.controller.refreshFromPlugin();
+        }
     }
 }
 
 class SourcePickerModal extends Modal {
-    constructor(app, options, initialSelection, onApply, titleText = "Filter by Source") {
+    constructor(app, plugin, optionFetcher, initialSelection, onApply, titleText = "Filter by Source") {
         super(app);
-        this.options = options; // [{key, label, count}]
+        this.plugin = plugin;
+        this.optionFetcher = optionFetcher;
+        this.options = optionFetcher() || [];
         this.onApply = onApply;
         this.titleText = titleText;
         this.query = "";
         // If initialSelection is empty that means "show all" → pre-check every box
         this.pendingKeys =
             initialSelection.size === 0
-                ? new Set(options.map((o) => o.key))
+                ? new Set(this.options.map((o) => o.key))
                 : new Set(initialSelection);
     }
 
     onOpen() {
+        this.plugin.registerModal(this);
         this.modalEl.classList.add("ttrpg-vs-source-modal");
         this.contentEl.empty();
         this.contentEl.classList.add("ttrpg-vs-source");
@@ -5110,7 +8617,13 @@ class SourcePickerModal extends Modal {
     }
 
     onClose() {
+        this.plugin.unregisterModal(this);
         this.contentEl.empty();
+    }
+
+    refreshFromPlugin() {
+        this.options = this.optionFetcher() || [];
+        this.renderList();
     }
 
     renderList() {
@@ -5126,21 +8639,22 @@ class SourcePickerModal extends Modal {
 
         this.listEl.replaceChildren();
 
+        const doc = this.contentEl.ownerDocument;
         if (!filtered.length) {
-            const emptyEl = document.createElement("div");
+            const emptyEl = doc.createElement("div");
             emptyEl.className = "ttrpg-vs__empty";
             emptyEl.textContent = "No matching sources.";
             this.listEl.appendChild(emptyEl);
             return;
         }
 
-        const fragment = document.createDocumentFragment();
+        const fragment = doc.createDocumentFragment();
 
         filtered.forEach((option) => {
-            const labelEl = document.createElement("label");
+            const labelEl = doc.createElement("label");
             labelEl.className = "ttrpg-vs-type__item";
 
-            const checkboxEl = document.createElement("input");
+            const checkboxEl = doc.createElement("input");
             checkboxEl.type = "checkbox";
             checkboxEl.className = "ttrpg-vs-type__checkbox";
             checkboxEl.checked = this.pendingKeys.has(option.key);
@@ -5152,11 +8666,23 @@ class SourcePickerModal extends Modal {
                 }
             });
 
-            const nameEl = document.createElement("span");
+            const nameEl = doc.createElement("span");
             nameEl.className = "ttrpg-vs-source__name";
             nameEl.textContent = option.label;
 
-            const countEl = document.createElement("span");
+            // Re-style and add context menu if it is a source option list!
+            if (this.titleText.toLowerCase().includes("source") && option.key) {
+                nameEl.className = "ttrpg-vs-source__name ttrpg-vs__chip ttrpg-vs__chip--clickable";
+                this.plugin.applySourceChipStyle(nameEl, option.key);
+                nameEl.style.cursor = "pointer";
+                nameEl.title = `Right-click to edit source chip`;
+                nameEl.addEventListener("contextmenu", (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    new SourceChipEditModal(this.app, this.plugin, option.key, option.rawLabel || option.label).open();
+                });
+            }
+
+            const countEl = doc.createElement("span");
             countEl.className = "ttrpg-vs-source__count";
             countEl.textContent = String(option.count);
 
@@ -5179,7 +8705,7 @@ class ReaderEngine {
         this.app = app;
         this.plugin = plugin;
         this.callbacks = Object.assign(
-            { setTitle: () => {}, goBack: () => {}, closeReader: null, isPopout: false },
+            { setTitle: () => { }, goBack: () => { }, closeReader: null, isPopout: false },
             callbacks
         );
         this.entries = [];
@@ -5194,7 +8720,14 @@ class ReaderEngine {
         this._searchMatchIndex = -1;
     }
 
-    refreshFromPlugin() {}
+    refreshFromPlugin() {
+        this.handleBookmarksChanged();
+    }
+
+    handleBookmarksChanged() {
+        this.updateBookmarkButton();
+        this.updateBookmarkCollectionButton();
+    }
 
     buildTTRPGSearchButtonBlock(entry) {
         if (!entry) return "";
@@ -5402,22 +8935,23 @@ class ReaderEngine {
 
     renderSectionList() {
         this.sectionButtonsEl.replaceChildren();
+        const doc = this.containerEl.ownerDocument;
         this.entries.forEach((entry, index) => {
-            const buttonEl = document.createElement("button");
+            const buttonEl = doc.createElement("button");
             buttonEl.type = "button";
             buttonEl.className = "ttrpg-reader__section";
             buttonEl.style.setProperty("--ttrpg-depth", String(collectionDepth(entry)));
             if (index === this.selectedIndex) buttonEl.classList.add("is-active");
             buttonEl.addEventListener("click", () => void this.selectIndex(index));
 
-            const titleEl = document.createElement("div");
+            const titleEl = doc.createElement("div");
             titleEl.className = "ttrpg-reader__section-title";
             titleEl.textContent = entry.displayName || "Untitled";
             buttonEl.appendChild(titleEl);
 
             const metaText = sectionMeta(entry);
             if (metaText) {
-                const metaEl = document.createElement("div");
+                const metaEl = doc.createElement("div");
                 metaEl.className = "ttrpg-reader__section-meta";
                 metaEl.textContent = metaText;
                 buttonEl.appendChild(metaEl);
@@ -5471,7 +9005,32 @@ class ReaderEngine {
         } else {
             this.contentTitleEl.setText(entry.displayName);
         }
-        this.contentMetaEl.setText(entry.path);
+        this.contentMetaEl.empty();
+        if (entry.sourceKey) {
+            const chip = this.contentMetaEl.createEl("button", {
+                cls: "ttrpg-vs__chip ttrpg-vs__chip--clickable",
+                text: this.plugin.getSourceDisplayLabel(entry.sourceKey, entry.sourceLabel || entry.sourceKey),
+                type: "button"
+            });
+            chip.style.marginRight = "8px";
+            this.plugin.applySourceChipStyle(chip, entry.sourceKey);
+            chip.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const controller = this.plugin.getBestiaryController();
+                if (controller) {
+                    controller.selectedSources = new Set([entry.sourceKey]);
+                    controller.renderFiltersTab();
+                    controller.renderMainContent();
+                }
+            });
+            chip.addEventListener("contextmenu", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                new SourceChipEditModal(this.app, this.plugin, entry.sourceKey, entry.sourceLabel || entry.sourceKey).open();
+            });
+        }
+        this.contentMetaEl.createSpan({ text: entry.path });
         this.contentBodyEl.empty();
         this.contentBodyEl.scrollTop = 0;
         this.subheadingsEl.replaceChildren();
@@ -5495,6 +9054,8 @@ class ReaderEngine {
             requestAnimationFrame(() => {
                 if (this.contentBodyEl) this.contentBodyEl.scrollTop = restoreScrollTop;
             });
+        } else if (this.searchState && this.searchState.query) {
+            highlightAndScrollToQuery(this.contentBodyEl, this.searchState.query);
         }
     }
 
@@ -5539,7 +9100,7 @@ class ReaderEngine {
         const decoded = decodeURIComponent(fragment).trim();
         if (!decoded) return;
         const find = () => {
-            try { const el = this.contentBodyEl.querySelector(`#${CSS.escape(decoded)}`); if (el) return el; } catch (_) {}
+            try { const el = this.contentBodyEl.querySelector(`#${CSS.escape(decoded)}`); if (el) return el; } catch (_) { }
             const lower = decoded.toLowerCase();
             for (const el of this.contentBodyEl.querySelectorAll("[id]")) {
                 if (el.id.toLowerCase() === lower) return el;
@@ -5628,8 +9189,9 @@ class ReaderEngine {
         this.subheadingsEl.replaceChildren();
         this.headingTargets = [];
         const headingEls = this.contentBodyEl.querySelectorAll("h1, h2, h3, h4, h5, h6");
+        const doc = this.containerEl.ownerDocument;
         if (!headingEls.length) {
-            const emptyEl = document.createElement("div");
+            const emptyEl = doc.createElement("div");
             emptyEl.className = "ttrpg-reader__section-meta";
             emptyEl.textContent = "No subheadings in this note.";
             this.subheadingsEl.appendChild(emptyEl);
@@ -5644,21 +9206,21 @@ class ReaderEngine {
             this.headingTargets.push({ id, text, level, element: headingEl });
         });
         if (!this.headingTargets.length) {
-            const emptyEl = document.createElement("div");
+            const emptyEl = doc.createElement("div");
             emptyEl.className = "ttrpg-reader__section-meta";
             emptyEl.textContent = "No subheadings in this note.";
             this.subheadingsEl.appendChild(emptyEl);
             return;
         }
         const baseLevel = Math.min(...this.headingTargets.map((h) => h.level));
-        const fragment = document.createDocumentFragment();
+        const fragment = doc.createDocumentFragment();
         this.headingTargets.forEach((heading) => {
-            const buttonEl = document.createElement("button");
+            const buttonEl = doc.createElement("button");
             buttonEl.type = "button";
             buttonEl.className = "ttrpg-reader__subheading";
             buttonEl.style.setProperty("--ttrpg-depth", String(Math.max(0, heading.level - baseLevel)));
             buttonEl.addEventListener("click", () => heading.element.scrollIntoView({ block: "start", behavior: "smooth" }));
-            const titleEl = document.createElement("div");
+            const titleEl = doc.createElement("div");
             titleEl.className = "ttrpg-reader__subheading-title";
             titleEl.textContent = heading.text;
             buttonEl.appendChild(titleEl);
@@ -5694,21 +9256,22 @@ class ReaderEngine {
             if (pattern.test(node.nodeValue || "")) textNodes.push(node);
             pattern.lastIndex = 0;
         }
+        const doc = this.containerEl.ownerDocument;
         for (const textNode of textNodes) {
             const text = textNode.nodeValue || "";
             pattern.lastIndex = 0;
-            const frag = document.createDocumentFragment();
+            const frag = doc.createDocumentFragment();
             let lastIndex = 0, match;
             while ((match = pattern.exec(text)) !== null) {
-                if (match.index > lastIndex) frag.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
-                const mark = document.createElement("mark");
+                if (match.index > lastIndex) frag.appendChild(doc.createTextNode(text.slice(lastIndex, match.index)));
+                const mark = doc.createElement("mark");
                 mark.className = "ttrpg-reader__find-match";
                 mark.textContent = match[0];
                 frag.appendChild(mark);
                 this._searchMatches.push(mark);
                 lastIndex = pattern.lastIndex;
             }
-            if (lastIndex < text.length) frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+            if (lastIndex < text.length) frag.appendChild(doc.createTextNode(text.slice(lastIndex)));
             if (textNode.parentNode) textNode.parentNode.replaceChild(frag, textNode);
         }
         if (this._searchMatches.length) { this._searchMatchIndex = 0; this._highlightCurrent(); }
@@ -5750,72 +9313,29 @@ class ReaderEngine {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TTRPGReaderModal – thin wrapper: hosts ReaderEngine inside a blocking Modal
-// ─────────────────────────────────────────────────────────────────────────────
-class TTRPGReaderModal extends Modal {
-    constructor(app, plugin, entries, initialIndex = 0, searchState = null) {
-        super(app);
-        this.plugin = plugin;
-        this.entries = entries || [];
-        this.initialIndex = initialIndex;
-        this.searchState = searchState;
-        this._engine = null;
-    }
-
-    onOpen() {
-        this.plugin.registerModal(this);
-        this.modalEl.classList.add("ttrpg-reader-modal");
-        this.contentEl.empty();
-        this.contentEl.classList.add("ttrpg-reader");
-        this._engine = new ReaderEngine(this.app, this.plugin, {
-            setTitle: (text) => this.titleEl.setText(text),
-            goBack: (state) => { this.close(); this.plugin.openSearchModal(state); },
-            closeReader: () => this.close(),
-            isPopout: false,
-        });
-        this._engine.build(this.contentEl, this.entries, this.initialIndex, this.searchState);
-    }
-
-    onClose() {
-        if (this._engine) { this._engine.destroy(); this._engine = null; }
-        this.plugin.unregisterModal(this);
-        this.contentEl.empty();
-    }
-
-    handleBookmarksChanged() { if (this._engine) this._engine.handleBookmarksChanged(); }
-    refreshFromPlugin() {}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // TTRPGReaderView – hosts ReaderEngine inside a leaf / pop-out Obsidian window
-// ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// TTRPGReaderView – tab-based pop-out window (ItemView)
-// Each search or reader tab lives in its own panel inside one Obsidian leaf.
 // ─────────────────────────────────────────────────────────────────────────────
 class TTRPGReaderView extends ItemView {
     constructor(leaf, plugin) {
         super(leaf);
         this.plugin = plugin;
-        this.tabs = [];          // [{id, type, title, panelEl, engine, ro?}]
-        this.activeTabId = null;
-        this._tabBarEl  = null;
-        this._tabBodyEl = null;
-        this.displayTitle = "TTRPG";
+        this.engine = null;
+        this.displayTitle = "TTRPG Reader";
+        this.entries = [];
+        this.initialIndex = 0;
+        this.searchState = null;
+        this.sourceMode = "window";
     }
 
-    getViewType()    { return TTRPG_READER_VIEW_TYPE; }
-    getDisplayText() { return this.displayTitle || "TTRPG"; }
-    getIcon()        { return "book-open"; }
+    getViewType() { return TTRPG_READER_VIEW_TYPE; }
+    getDisplayText() { return this.displayTitle || "TTRPG Reader"; }
+    getIcon() { return "book-open"; }
 
     _setViewTitle(title) {
-        const clean = String(title || "TTRPG").trim() || "TTRPG";
+        const clean = String(title || "TTRPG Reader").trim() || "TTRPG Reader";
         this.displayTitle = clean;
         if (this.contentEl) this.contentEl.dataset.ttrpgTitle = clean;
 
-        // Obsidian does not always re-read getDisplayText() for custom ItemViews after
-        // their internal state changes, especially in pop-out windows. Update the tab
-        // header defensively as well.
         try {
             if (this.leaf && this.leaf.tabHeaderInnerTitleEl) {
                 const titleEl = this.leaf.tabHeaderInnerTitleEl;
@@ -5832,186 +9352,160 @@ class TTRPGReaderView extends ItemView {
 
     async onOpen() {
         this.plugin.registerModal(this);
-        this._setViewTitle("Search");
         this.contentEl.empty();
         this.contentEl.addClass("ttrpg-popout-view");
-        this._tabBarEl  = this.contentEl.createDiv({ cls: "ttrpg-popout__tabbar" });
-        this._tabBarEl.style.display = "none";
-        this._tabBodyEl = this.contentEl.createDiv({ cls: "ttrpg-popout__body" });
-        // Tabs are populated by initSearchView() or setReaderState() after setViewState resolves
-        const ph = this._tabBodyEl.createDiv({ cls: "ttrpg-popout__panel is-search" });
-        ph.createDiv({ cls: "ttrpg-reader__empty", text: "Loading…" });
-    }
+        this.contentEl.addClass("ttrpg-reader");
 
-    // Called by openSearchPopout — sets up a fresh search tab with state
-    initSearchView(initialState) {
-        this._setViewTitle("Search");
-        this._resetTabs();
-        this._addSearchTab(initialState);
-    }
-
-    // Destroy all tabs (for re-init)
-    _resetTabs() {
-        for (const tab of this.tabs) {
-            if (tab.ro)     { tab.ro.disconnect(); tab.ro = null; }
-            if (tab.engine) { tab.engine.destroy(); tab.engine = null; }
-            tab.panelEl.remove();
+        if (this.entries && this.entries.length) {
+            this.buildEngine();
         }
-        this.tabs = [];
-        this.activeTabId = null;
-        // Clear placeholder too
-        this._tabBodyEl.empty();
-        if (this._tabBarEl) this._tabBarEl.replaceChildren();
     }
 
-    // ── Tab management ────────────────────────────────────────────────────────
+    setReaderState(entries, initialIndex, searchState, sourceMode) {
+        this.entries = entries || [];
+        this.initialIndex = initialIndex || 0;
+        this.searchState = searchState || null;
+        const mode = sourceMode === true ? "native" : (sourceMode || "window");
+        this.sourceMode = mode;
 
-    _addSearchTab(initialState) {
-        this._setViewTitle("Search");
-        const id = "search-" + Date.now();
-        const panelEl = this._tabBodyEl.createDiv({ cls: "ttrpg-popout__panel is-search" });
-        const tab = { id, type: "search", title: "Search", panelEl, engine: null, ro: null };
-        this.tabs.push(tab);
-        this._buildSearchPanel(tab, panelEl, initialState);
-        this._renderTabBar();
-        this._activateTab(id);
-        return id;
-    }
-    _addReaderTab(entries, initialIndex, searchState, options = {}) {
-        // If same collection already open in a reader tab, just switch to it.
-        const existingId = this._findReaderTabForEntries(entries, initialIndex);
-        if (existingId) { this._activateTab(existingId); return existingId; }
-
-        const id = "reader-" + Date.now();
-        const first = entries[0];
-        const title = (entries[initialIndex] && (entries[initialIndex].collectionName || entries[initialIndex].displayName)) || (first && (first.collectionName || first.displayName)) || "Reader";
-        const sourceMode = options && options.sourceMode ? options.sourceMode : "window";
-        const isDetachedWindow = sourceMode === "window";
-        this.displayTitle = title;
+        const first = this.entries[0];
+        const title = (this.entries[this.initialIndex] && (this.entries[this.initialIndex].collectionName || this.entries[this.initialIndex].displayName)) || (first && (first.collectionName || first.displayName)) || "Reader";
         this._setViewTitle(title);
-        const panelEl = this._tabBodyEl.createDiv({ cls: "ttrpg-popout__panel is-reader ttrpg-reader" });
-        const tab = { id, type: "reader", title, panelEl, engine: null, ro: null, sourceMode };
+
+        if (this.contentEl) {
+            this.buildEngine();
+        }
+    }
+
+    buildEngine() {
+        if (this.engine) {
+            this.engine.destroy();
+            this.engine = null;
+        }
+        this.contentEl.empty();
 
         const self = this;
-        tab.engine = new ReaderEngine(this.app, this.plugin, {
-            setTitle: (text) => { tab.title = text; self._setViewTitle(text); self._renderTabBar(); },
+        const isDetachedWindow = this.sourceMode === "window";
+        this.engine = new ReaderEngine(this.app, this.plugin, {
+            setTitle: (text) => { self._setViewTitle(text); },
             goBack: (state) => {
-                // Close this reader tab and switch to the nearest search tab.
-                self._closeTab(id);
-                const searchTab = self.tabs.find(t => t.type === "search");
-                if (searchTab) self._activateTab(searchTab.id);
+                self.leaf.detach();
             },
-            closeReader: null,
+            closeReader: () => {
+                self.leaf.detach();
+            },
             isPopout: isDetachedWindow,
             onPopBackIn: async () => {
-                // Move this reader from a detached window back into a normal workspace tab.
-                const e = tab.engine ? tab.engine.entries : entries;
-                const i = tab.engine ? tab.engine.selectedIndex : initialIndex;
-                const s = tab.engine ? tab.engine.searchState : searchState;
+                const e = self.engine ? self.engine.entries : self.entries;
+                const i = self.engine ? self.engine.selectedIndex : self.initialIndex;
+                const s = self.engine ? self.engine.searchState : self.searchState;
                 await self.plugin.openReaderNativeTab(e, i, s);
-                self._closeTab(id);
+                self.leaf.detach();
             },
         });
-        tab.engine.build(panelEl, entries, initialIndex, searchState);
-
-        this.tabs.push(tab);
-        this._renderTabBar();
-        this._activateTab(id);
-        return id;
+        this.engine.build(this.contentEl, this.entries, this.initialIndex, this.searchState);
     }
 
-    _findReaderTabForEntries(entries, initialIndex) {
-        if (!entries || !entries[0]) return null;
-        const targetPath = entries[initialIndex]?.path || entries[0]?.path;
-        const targetColl = entries[0]?.collectionPath;
-        for (const tab of this.tabs) {
-            if (tab.type !== "reader" || !tab.engine) continue;
-            const tabFirst = tab.engine.entries[0];
-            if (!tabFirst) continue;
-            // Same single-entry view
-            if (tabFirst.path === targetPath && tab.engine.entries.length === 1) return tab.id;
-            // Same collection
-            if (targetColl && tabFirst.collectionPath === targetColl) return tab.id;
+    async onClose() {
+        if (this.engine) {
+            this.engine.destroy();
+            this.engine = null;
         }
-        return null;
+        this.plugin.unregisterModal(this);
     }
 
-    _closeTab(id) {
-        const idx = this.tabs.findIndex(t => t.id === id);
-        if (idx < 0) return;
-        const tab = this.tabs[idx];
-        if (tab.ro)     { tab.ro.disconnect(); tab.ro = null; }
-        if (tab.engine) { tab.engine.destroy(); tab.engine = null; }
-        tab.panelEl.remove();
-        this.tabs.splice(idx, 1);
-        this._renderTabBar();
-
-        if (this.activeTabId === id) {
-            const next = this.tabs[Math.min(idx, this.tabs.length - 1)];
-            if (next) this._activateTab(next.id);
-            else      this.leaf.detach();
-        }
+    handleBookmarksChanged() {
+        if (this.engine) this.engine.handleBookmarksChanged();
     }
 
-    _activateTab(id) {
-        this.activeTabId = id;
-        for (const tab of this.tabs) {
-            if (tab.id === id) {
-                tab.panelEl.removeAttribute("hidden");
-            } else {
-                tab.panelEl.setAttribute("hidden", "");
-            }
-        }
-        this._renderTabBar();
+    refreshFromPlugin() {
+        if (this.engine) this.engine.handleBookmarksChanged();
     }
+}
 
-    _renderTabBar() {
-        this._tabBarEl.replaceChildren();
-        for (const tab of this.tabs) {
-            const el = document.createElement("div");
-            el.className = "ttrpg-popout__tab" + (tab.id === this.activeTabId ? " is-active" : "");
+class TTRPGSearchView extends ItemView {
+    constructor(leaf, plugin) {
+        super(leaf);
+        this.plugin = plugin;
+        this.initialState = null;
+        this.ro = null;
+        this.refreshResults = null;
+        this.hoverPopover = null;
+    }
+    getViewType() { return TTRPG_SEARCH_VIEW_TYPE; }
+    getDisplayText() { return "TTRPG Vault Search"; }
+    getIcon() { return "search"; }
+    async onOpen() {
+        this.plugin.registerModal(this);
+        this.contentEl.empty();
+        this.contentEl.addClass("ttrpg-popout-view");
+        this.contentEl.addClass("ttrpg-vs");
+        this.contentEl.style.height = "100%";
+        this.contentEl.style.overflow = "hidden";
+        this.contentEl.style.padding = "12px";
+        this.contentEl.style.boxSizing = "border-box";
+        this.contentEl.style.display = "flex";
+        this.contentEl.style.flexDirection = "column";
 
-            const titleEl = document.createElement("span");
-            titleEl.className = "ttrpg-popout__tab-title";
-            titleEl.textContent = tab.title;
-            titleEl.title = tab.title;
-            titleEl.addEventListener("click", () => this._activateTab(tab.id));
-            el.appendChild(titleEl);
-
-            const closeBtn = document.createElement("button");
-            closeBtn.className = "ttrpg-popout__tab-close";
-            closeBtn.textContent = "×";
-            closeBtn.title = "Close tab";
-            closeBtn.addEventListener("click", (e) => { e.stopPropagation(); this._closeTab(tab.id); });
-            el.appendChild(closeBtn);
-
-            this._tabBarEl.appendChild(el);
+        this.buildSearchPanel(this.initialState);
+    }
+    initSearchView(initialState) {
+        this.initialState = initialState;
+        if (this.contentEl && this.contentEl.isConnected) {
+            this.buildSearchPanel(initialState);
         }
     }
+    buildSearchPanel(initialState) {
+        this.contentEl.empty();
+        this._buildSearchPanel(this.contentEl, initialState);
+    }
+    async onClose() {
+        if (this.plugin.settings.saveLastSearch && typeof this.getSnapshot === "function") {
+            const snap = this.getSnapshot();
+            this.plugin._cachedSearchState = snap;
+            this.plugin.settings.lastSearchState = snap;
+            void this.plugin.saveSettings(false);
+        }
+        if (this.ro) {
+            this.ro.disconnect();
+            this.ro = null;
+        }
+        this.refreshResults = null;
+        this.plugin.unregisterModal(this);
+    }
+    handleBookmarksChanged() {
+        if (this.refreshResults) this.refreshResults();
+    }
+    refreshFromPlugin() {
+        if (this.refreshResults) this.refreshResults();
+    }
 
-    // ── Inline search panel ───────────────────────────────────────────────────
-    _buildSearchPanel(tab, containerEl, initialState) {
+    _buildSearchPanel(containerEl, initialState) {
+        const doc = containerEl.ownerDocument;
+        const win = doc.defaultView || window;
         // ── State ─────────────────────────────────────────────────────────────
-        let query          = initialState?.query || "";
-        let selectedTypes  = new Set(Array.isArray(initialState?.selectedTypes)  ? initialState.selectedTypes  : []);
-        let selectedSources= new Set(Array.isArray(initialState?.selectedSources) ? initialState.selectedSources : []);
-        let sortMode       = initialState?.sortMode || this.plugin.settings.sortMode || "relevance";
-        let showBookmarks  = !!(initialState?.showBookmarksOnly);
+        let query = initialState?.query || "";
+        let selectedTypes = new Set(Array.isArray(initialState?.selectedTypes) ? initialState.selectedTypes : []);
+        let selectedSources = new Set(Array.isArray(initialState?.selectedSources) ? initialState.selectedSources : []);
+        let sortMode = initialState?.sortMode || this.plugin.settings.sortMode || "relevance";
+        let showBookmarks = !!(initialState?.showBookmarksOnly);
+        let selectedBookmarkGroup = initialState?.selectedBookmarkGroup ?? null;
         let visibleEntries = [];
-        let selectedIndex  = 0;
-        let renderedItems  = new Map();
-        let virtualQueued  = false;
+        let selectedIndex = 0;
+        let renderedItems = new Map();
+        let virtualQueued = false;
         let renderGeneration = 0;
-        let collReps       = new Set();
-        let collCounts     = new Map();
+        let collReps = new Set();
+        let collCounts = new Map();
 
         // ── DOM ───────────────────────────────────────────────────────────────
-        const toolbarEl  = containerEl.createDiv({ cls: "ttrpg-vs__toolbar" });
-        const inputEl    = toolbarEl.createEl("input", { cls: "ttrpg-vs__search" });
+        const toolbarEl = containerEl.createDiv({ cls: "ttrpg-vs__toolbar" });
+        const inputEl = toolbarEl.createEl("input", { cls: "ttrpg-vs__search" });
         inputEl.type = "search";
         inputEl.placeholder = "Search spells, items, monsters, adventures…";
         inputEl.spellcheck = false;
         inputEl.value = query;
+        inputEl.addEventListener("blur", () => saveSearchState());
 
         const filtersEl = toolbarEl.createDiv({ cls: "ttrpg-vs__filters" });
 
@@ -6028,14 +9522,13 @@ class TTRPGReaderView extends ItemView {
         const sortWrap = filtersEl.createDiv({ cls: "ttrpg-vs__filter" });
         sortWrap.createDiv({ cls: "ttrpg-vs__label", text: "Sort" });
         const sortSelectEl = sortWrap.createEl("select", { cls: "ttrpg-vs__select" });
-        [["relevance","Relevance"],["name","Name"],["source","Source"],["type","Type"]].forEach(([v,l]) => {
-            const o = document.createElement("option"); o.value = v; o.textContent = l; sortSelectEl.appendChild(o);
+        [["relevance", "Relevance"], ["name", "Name"], ["source", "Source"], ["type", "Type"]].forEach(([v, l]) => {
+            const o = doc.createElement("option"); o.value = v; o.textContent = l; sortSelectEl.appendChild(o);
         });
         sortSelectEl.value = sortMode;
 
-        // Button row: Bookmarks, Manage, Clear source, Spellbook, Pop Back In
-        const btnRowEl = toolbarEl.createDiv({ cls: "ttrpg-vs__button-row" });
-
+        // Button row
+        const btnRowEl = filtersEl.createDiv({ cls: "ttrpg-vs__button-row" });
         const bookmarksBtn = btnRowEl.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Bookmarks" });
         bookmarksBtn.type = "button";
 
@@ -6046,16 +9539,29 @@ class TTRPGReaderView extends ItemView {
         const clearSrcBtn = btnRowEl.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Clear source" });
         clearSrcBtn.type = "button"; clearSrcBtn.disabled = true;
 
+        const presetSelectEl = btnRowEl.createEl("select", { cls: "ttrpg-vs__select" });
+        presetSelectEl.style.width = "auto";
+        presetSelectEl.appendChild(Object.assign(doc.createElement("option"), { value: "", textContent: "Preset…" }));
+        for (const preset of this.plugin.getFilterPresets()) {
+            const opt = doc.createElement("option");
+            opt.value = preset.id;
+            opt.textContent = preset.name;
+            presetSelectEl.appendChild(opt);
+        }
+
         const spellbookBtn = btnRowEl.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Spellbook" });
         spellbookBtn.type = "button"; spellbookBtn.title = "Open Spellbook";
 
         const popInBtn = btnRowEl.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "⤡ Pop In" });
         popInBtn.type = "button"; popInBtn.title = "Move search back to main window";
 
-        const statsEl    = containerEl.createDiv({ cls: "ttrpg-vs__stats" });
+        const groupTabsEl = toolbarEl.createDiv({ cls: "ttrpg-vs__group-tabs" });
+        groupTabsEl.style.display = "none";
+
+        const statsEl = containerEl.createDiv({ cls: "ttrpg-vs__stats" });
         const viewportEl = containerEl.createDiv({ cls: "ttrpg-vs__viewport" });
-        const canvasEl   = viewportEl.createDiv({ cls: "ttrpg-vs__canvas" });
-        const emptyEl    = viewportEl.createDiv({ cls: "ttrpg-vs__empty" });
+        const canvasEl = viewportEl.createDiv({ cls: "ttrpg-vs__canvas" });
+        const emptyEl = viewportEl.createDiv({ cls: "ttrpg-vs__empty" });
         emptyEl.setText("No matching entries found.");
 
         // ── Helpers ───────────────────────────────────────────────────────────
@@ -6063,8 +9569,19 @@ class TTRPGReaderView extends ItemView {
             query, selectedTypes: Array.from(selectedTypes),
             selectedSources: Array.from(selectedSources),
             sortMode, showBookmarksOnly: showBookmarks,
+            selectedBookmarkGroup,
             scrollTop: viewportEl.scrollTop,
         });
+        this.getSnapshot = getSnapshot;
+
+        const saveSearchState = () => {
+            if (this.plugin.settings.saveLastSearch) {
+                const snap = getSnapshot();
+                this.plugin._cachedSearchState = snap;
+                this.plugin.settings.lastSearchState = snap;
+                void this.plugin.saveSettings(false);
+            }
+        };
 
         const updateTypeButton = () => {
             const opts = this.plugin.getTypeOptions();
@@ -6096,16 +9613,66 @@ class TTRPGReaderView extends ItemView {
             bookmarksBtn.textContent = showBookmarks ? `Bookmarks Only (${count})` : `Bookmarks (${count})`;
             bookmarksBtn.classList.toggle("is-active", showBookmarks);
             manageBtn.style.display = showBookmarks ? "" : "none";
+            renderBookmarkGroupTabs();
+        };
+
+        const renderBookmarkGroupTabs = () => {
+            groupTabsEl.replaceChildren();
+            if (!showBookmarks) {
+                groupTabsEl.style.display = "none";
+                return;
+            }
+            const groups = this.plugin.getBookmarkGroups();
+            if (!groups.length) {
+                groupTabsEl.style.display = "none";
+                return;
+            }
+            groupTabsEl.style.display = "";
+
+            const allTab = doc.createElement("button");
+            allTab.type = "button";
+            allTab.className = "ttrpg-vs__group-tab" + (selectedBookmarkGroup === null ? " is-active" : "");
+            allTab.textContent = "All";
+            allTab.addEventListener("click", () => {
+                selectedBookmarkGroup = null;
+                renderBookmarkGroupTabs();
+                refreshResults(true);
+                saveSearchState();
+            });
+            groupTabsEl.appendChild(allTab);
+
+            const ungroupedTab = doc.createElement("button");
+            ungroupedTab.type = "button";
+            ungroupedTab.className = "ttrpg-vs__group-tab" + (selectedBookmarkGroup === "ungrouped" ? " is-active" : "");
+            ungroupedTab.textContent = "Ungrouped";
+            ungroupedTab.addEventListener("click", () => {
+                selectedBookmarkGroup = "ungrouped";
+                renderBookmarkGroupTabs();
+                refreshResults(true);
+                saveSearchState();
+            });
+            groupTabsEl.appendChild(ungroupedTab);
+
+            for (const group of groups) {
+                const tab = doc.createElement("button");
+                tab.type = "button";
+                tab.className = "ttrpg-vs__group-tab" + (selectedBookmarkGroup === group.id ? " is-active" : "");
+                tab.textContent = group.name;
+                tab.addEventListener("click", () => {
+                    selectedBookmarkGroup = group.id;
+                    renderBookmarkGroupTabs();
+                    refreshResults(true);
+                    saveSearchState();
+                });
+                groupTabsEl.appendChild(tab);
+            }
         };
 
         const scheduleVirtualRender = (forceFullRebuild = false) => {
-            // Static bounded rendering: rebuild only when the result set changes.
-            // Scroll events call this without forceFullRebuild, so ignore them once rows exist.
-            if (!forceFullRebuild && renderedItems.size) return;
             if (forceFullRebuild) scheduleVirtualRender.needsFullRebuild = true;
             if (virtualQueued) return;
             virtualQueued = true;
-            requestAnimationFrame(() => {
+            win.requestAnimationFrame(() => {
                 virtualQueued = false;
                 renderVirtualRows();
             });
@@ -6129,6 +9696,7 @@ class TTRPGReaderView extends ItemView {
         };
 
         const openEntry = async (entry) => {
+            await new Promise(resolve => setTimeout(resolve, 50));
             const isCollRep = collReps.has(entry.path) && !!entry.collectionKind;
             let entries, initialIndex;
             if (isCollRep) {
@@ -6138,130 +9706,166 @@ class TTRPGReaderView extends ItemView {
                 entries = this.plugin.getReaderEntriesForEntry(entry);
                 initialIndex = Math.max(0, entries.findIndex(e => e.path === entry.path));
             }
-            try {
-                try {
-                await this.plugin.openReaderNativeTab(entries, initialIndex, getSnapshot());
-            } catch (err) {
-                console.error("TTRPG reader native-tab open failed; falling back to same-window reader tab", err);
-                this._addReaderTab(entries, initialIndex, getSnapshot());
-            }
-            } catch (err) {
-                console.error("TTRPG reader native-tab open failed; falling back to same-window reader tab", err);
-                this._addReaderTab(entries, initialIndex, getSnapshot());
-            }
+            saveSearchState();
+            await this.plugin.openReaderNativeTab(entries, initialIndex, getSnapshot());
         };
 
         const createResultEl = (entry, index) => {
-            const itemEl = document.createElement("div");
+            const itemEl = doc.createElement("div");
             itemEl.className = "ttrpg-vs__result";
             if (index === selectedIndex) itemEl.classList.add("is-selected");
             itemEl.addEventListener("mouseenter", () => setSelectedIndex(index, false));
             itemEl.addEventListener("click", () => openEntry(entry));
 
+            // Ctrl-hover preview
+            const handleHover = (e) => {
+                if (e.ctrlKey || e.metaKey) {
+                    this.plugin.app.workspace.trigger("hover-link", {
+                        event: e,
+                        source: "search",
+                        hoverParent: this,
+                        targetEl: itemEl,
+                        linktext: entry.path,
+                        sourcePath: ""
+                    });
+                }
+            };
+            itemEl.addEventListener("mouseover", handleHover);
+            itemEl.addEventListener("mousemove", handleHover);
+
             const isCollRep = collReps.has(entry.path) && !!entry.collectionKind;
-            const topEl = document.createElement("div"); topEl.className = "ttrpg-vs__top";
-            const mainEl = document.createElement("div"); mainEl.className = "ttrpg-vs__main";
-            const titleEl = document.createElement("div"); titleEl.className = "ttrpg-vs__title";
+            const topEl = doc.createElement("div"); topEl.className = "ttrpg-vs__top";
+            const mainEl = doc.createElement("div"); mainEl.className = "ttrpg-vs__main";
+            const titleEl = doc.createElement("div"); titleEl.className = "ttrpg-vs__title";
 
             if (isCollRep) {
-                const s = document.createElement("span"); s.className = "ttrpg-vs__title-piece ttrpg-vs__title-chapter";
+                const s = doc.createElement("span"); s.className = "ttrpg-vs__title-piece ttrpg-vs__title-chapter";
                 s.innerHTML = highlightMatch(entry.collectionName, query); titleEl.appendChild(s);
             } else if (entry.collectionKind) {
-                const c = document.createElement("span"); c.className = "ttrpg-vs__title-piece ttrpg-vs__title-collection";
+                const c = doc.createElement("span"); c.className = "ttrpg-vs__title-piece ttrpg-vs__title-collection";
                 c.innerHTML = highlightMatch(entry.collectionName, query); titleEl.appendChild(c);
-                const sep = document.createElement("span"); sep.className = "ttrpg-vs__title-sep"; sep.textContent = "-"; titleEl.appendChild(sep);
-                const ch = document.createElement("span"); ch.className = "ttrpg-vs__title-piece ttrpg-vs__title-chapter";
+                const sep = doc.createElement("span"); sep.className = "ttrpg-vs__title-sep"; sep.textContent = "-"; titleEl.appendChild(sep);
+                const ch = doc.createElement("span"); ch.className = "ttrpg-vs__title-piece ttrpg-vs__title-chapter";
                 ch.innerHTML = highlightMatch(entry.displayName, query); titleEl.appendChild(ch);
             } else {
-                const s = document.createElement("span"); s.className = "ttrpg-vs__title-piece ttrpg-vs__title-chapter";
+                const s = doc.createElement("span"); s.className = "ttrpg-vs__title-piece ttrpg-vs__title-chapter";
                 s.innerHTML = highlightMatch(entry.displayName, query); titleEl.appendChild(s);
             }
             mainEl.appendChild(titleEl);
 
-            const metaEl = document.createElement("div"); metaEl.className = "ttrpg-vs__meta";
-            if (entry.sourceLabel) {
-                const chip = document.createElement("button"); chip.type = "button";
-                chip.className = "ttrpg-vs__chip ttrpg-vs__chip--clickable";
-                const sourceDisplayLabel = this.plugin.getSourceDisplayLabel(entry.sourceKey, entry.sourceLabel);
-                chip.textContent = sourceDisplayLabel; chip.title = `Filter by source: ${sourceDisplayLabel} (right-click to edit chip)`;
-                this.plugin.applySourceChipStyle(chip, entry.sourceKey);
-                chip.addEventListener("click", (e) => {
-                    e.preventDefault(); e.stopPropagation();
-                    selectedSources = new Set([entry.sourceKey]);
-                    updateSourceButton(); selectedIndex = 0; refreshResults(true);
-                });
-                chip.addEventListener("contextmenu", (e) => {
-                    e.preventDefault(); e.stopPropagation();
-                    new SourceChipEditModal(this.app, this.plugin, entry.sourceKey, entry.sourceLabel).open();
-                });
-                metaEl.appendChild(chip);
+            const metaEl = doc.createElement("div"); metaEl.className = "ttrpg-vs__meta";
+            if (entry.typeLabel) {
+                const t = doc.createElement("span"); t.className = "ttrpg-vs__badge"; t.textContent = entry.typeLabel; metaEl.appendChild(t);
             }
-            const metaTextEl = document.createElement("span"); metaTextEl.className = "ttrpg-vs__meta-text";
-            if (isCollRep) { const cnt = collCounts.get(entry.collectionPath) || 1; metaTextEl.textContent = `${entry.typeLabel} • ${cnt} section${cnt !== 1 ? "s" : ""}`; }
-            else if (entry.collectionKind) { metaTextEl.textContent = entry.isOverview ? `${entry.typeLabel} overview` : `${entry.typeLabel} chapter`; }
-            else { const sec = entry.fileLabel !== entry.displayName ? entry.fileLabel : (entry.aliases[0] || entry.typeLabel); metaTextEl.innerHTML = highlightMatch(sec, query); }
-            metaEl.appendChild(metaTextEl);
+            if (entry.sourceLabel) {
+                const s = doc.createElement("button");
+                s.type = "button";
+                s.className = "ttrpg-vs__chip ttrpg-vs__chip--clickable";
+                const sourceDisplayLabel = this.plugin.getSourceDisplayLabel(entry.sourceKey, entry.sourceLabel);
+                s.textContent = sourceDisplayLabel;
+                s.title = `Filter by source: ${sourceDisplayLabel} (right-click to edit chip)`;
+                this.plugin.applySourceChipStyle(s, entry.sourceKey);
+                s.addEventListener("click", (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    selectedSources = new Set([entry.sourceKey]);
+                    updateSourceButton();
+                    selectedIndex = 0;
+                    refreshResults(true);
+                });
+                s.addEventListener("contextmenu", (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    new SourceChipEditModal(this.app, this.plugin, entry.sourceKey, entry.sourceLabel || entry.sourceKey).open();
+                });
+                metaEl.appendChild(s);
+            }
+            const infoEl = doc.createElement("span"); infoEl.className = "ttrpg-vs__meta-text";
+            const parts = [];
+            if (entry.spellMeta) {
+                const sm = entry.spellMeta;
+                if (sm.school) parts.push(sm.school);
+                if (sm.level != null) parts.push(sm.level === 0 ? "Cantrip" : `Level ${sm.level}`);
+            }
+            if (entry.monsterMeta) {
+                const mm = entry.monsterMeta;
+                if (mm.bestiaryType) parts.push(mm.bestiaryType);
+                if (mm.cr != null && mm.cr !== "") parts.push(`CR ${mm.cr}`);
+            }
+            infoEl.textContent = parts.join(" • ");
+            metaEl.appendChild(infoEl);
             mainEl.appendChild(metaEl);
+            topEl.appendChild(mainEl);
 
-            const rightEl = document.createElement("div"); rightEl.className = "ttrpg-vs__right";
-            const badge = document.createElement("button"); badge.type = "button";
-            badge.className = "ttrpg-vs__badge ttrpg-vs__badge--clickable";
-            badge.textContent = entry.typeLabel; badge.title = `Filter by type: ${entry.typeLabel}`;
-            badge.addEventListener("click", (e) => {
-                e.preventDefault(); e.stopPropagation();
-                selectedTypes = new Set([entry.typeKey]);
-                updateTypeButton(); selectedIndex = 0; refreshResults(true);
+            const starEl = doc.createElement("button"); starEl.type = "button";
+            starEl.className = "ttrpg-vs__favorite" + (this.plugin.isBookmarked(entry.path) ? " is-active" : "");
+            starEl.textContent = this.plugin.isBookmarked(entry.path) ? "★" : "☆";
+            starEl.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                await this.plugin.toggleBookmark(entry.path);
+                starEl.classList.toggle("is-active", this.plugin.isBookmarked(entry.path));
+                starEl.textContent = this.plugin.isBookmarked(entry.path) ? "★" : "☆";
+                updateBookmarksButton();
             });
-            rightEl.appendChild(badge);
+            topEl.appendChild(starEl);
+            itemEl.appendChild(topEl);
 
-            const star = document.createElement("button"); star.type = "button"; star.className = "ttrpg-vs__star";
-            const refreshStar = () => { const bm = this.plugin.isBookmarked(entry.path); star.textContent = bm ? "★" : "☆"; star.classList.toggle("is-active", bm); };
-            refreshStar();
-            star.addEventListener("click", async (e) => { e.preventDefault(); e.stopPropagation(); await this.plugin.toggleBookmark(entry.path); refreshStar(); });
-            rightEl.appendChild(star);
-
-            topEl.appendChild(mainEl); topEl.appendChild(rightEl);
-            const pathEl = document.createElement("div"); pathEl.className = "ttrpg-vs__path";
-            pathEl.innerHTML = highlightMatch(entry.path, query);
-            itemEl.appendChild(topEl); itemEl.appendChild(pathEl);
+            if (entry.path) {
+                const p = doc.createElement("div"); p.className = "ttrpg-vs__path"; p.textContent = entry.path; itemEl.appendChild(p);
+            }
             return itemEl;
         };
 
         const renderVirtualRows = () => {
-            scheduleVirtualRender.needsFullRebuild = false;
-            const generation = ++renderGeneration;
-            renderedItems.clear();
-            canvasEl.replaceChildren();
+            const viewportH_val = viewportH || viewportEl.clientHeight || 400;
+            const scrollTop = viewportEl.scrollTop;
+            const startIdx = Math.max(0, Math.floor(scrollTop / RESULT_ROW_HEIGHT) - RESULT_OVERSCAN);
+            const endIdx = Math.min(visibleEntries.length - 1, Math.floor((scrollTop + viewportH_val) / RESULT_ROW_HEIGHT) + RESULT_OVERSCAN);
 
-            if (!visibleEntries.length) return;
+            if (scheduleVirtualRender.needsFullRebuild) {
+                scheduleVirtualRender.needsFullRebuild = false;
+                canvasEl.replaceChildren();
+                renderedItems.clear();
+            }
 
-            const chunkSize = 40;
-            let i = 0;
-            const renderChunk = () => {
-                if (generation !== renderGeneration) return;
-                const frag = document.createDocumentFragment();
-                const end = Math.min(visibleEntries.length, i + chunkSize);
-                for (; i < end; i++) {
-                    const el = createResultEl(visibleEntries[i], i);
-                    el.style.top = `${i * RESULT_ROW_HEIGHT}px`;
-                    frag.appendChild(el);
-                    renderedItems.set(i, el);
+            for (const [idx, el] of renderedItems.entries()) {
+                if (idx < startIdx || idx > endIdx) {
+                    el.remove();
+                    renderedItems.delete(idx);
                 }
-                if (frag.childNodes.length) canvasEl.appendChild(frag);
-                if (i < visibleEntries.length) requestAnimationFrame(renderChunk);
-            };
-            renderChunk();
+            }
+
+            const fragment = doc.createDocumentFragment();
+            for (let i = startIdx; i <= endIdx; i++) {
+                if (renderedItems.has(i)) continue;
+                const entry = visibleEntries[i];
+                if (!entry) continue;
+                const rowEl = createResultEl(entry, i);
+                rowEl.style.position = "absolute";
+                rowEl.style.top = `${i * RESULT_ROW_HEIGHT}px`;
+                rowEl.style.left = "0";
+                rowEl.style.right = "0";
+                rowEl.style.height = `${RESULT_ROW_HEIGHT}px`;
+                fragment.appendChild(rowEl);
+                renderedItems.set(i, rowEl);
+            }
+            if (fragment.childNodes.length) canvasEl.appendChild(fragment);
         };
 
-        const refreshResults = (resetScroll) => {
-            const titleOnly = !!this.plugin.settings.searchTitleOnly;
-            let entries = this.plugin.getEntries();
-            if (showBookmarks) {
-                const bm = new Set(this.plugin.getBookmarkedPaths());
-                entries = entries.filter(e => bm.has(e.path) || (e.collectionKind && bm.has(e.collectionPath)));
+        const refreshResults = (resetScroll = false) => {
+            renderGeneration++;
+            let entries = showBookmarks ? this.plugin.getBookmarkedEntries() : this.plugin.getEntries();
+            if (showBookmarks && selectedBookmarkGroup !== null) {
+                entries = entries.filter((e) => {
+                    const groupId = this.plugin.getBookmarkGroupForEntry(e);
+                    if (selectedBookmarkGroup === "ungrouped") return !groupId;
+                    return groupId === selectedBookmarkGroup;
+                });
             }
-            if (selectedTypes.size   > 0) entries = entries.filter(e => selectedTypes.has(e.typeKey));
+            if (selectedTypes.size > 0) entries = entries.filter(e => selectedTypes.has(e.typeKey));
             if (selectedSources.size > 0) entries = entries.filter(e => selectedSources.has(e.sourceKey));
+
+            const titleOnly = this.plugin.settings.searchTitleOnly !== false;
             entries = sortEntries(entries, sortMode, query, titleOnly);
             if (query.trim()) {
                 entries = entries.filter(e => scoreEntry(e, query, titleOnly) >= 0);
@@ -6276,118 +9880,214 @@ class TTRPGReaderView extends ItemView {
                 if (seen.has(e.collectionPath)) continue;
                 seen.add(e.collectionPath); collReps.add(e.path); deduped.push(e);
             }
-            const bookmarkOrderedEntries = showBookmarksOnly ? this.plugin.sortEntriesByBookmarkOrder(deduped, selectedBookmarkGroup) : deduped;
-            visibleEntries = bookmarkOrderedEntries.slice(0, this.plugin.settings.maxResults);
+            visibleEntries = (showBookmarks ? this.plugin.sortEntriesByBookmarkOrder(deduped, selectedBookmarkGroup) : deduped).slice(0, this.plugin.settings.maxResults);
             if (!visibleEntries.length) selectedIndex = 0;
             else selectedIndex = Math.max(0, Math.min(selectedIndex, visibleEntries.length - 1));
             if (resetScroll) viewportEl.scrollTop = 0;
             statsEl.textContent = `${entries.length} matching • ${visibleEntries.length} shown • ${this.plugin.getEntries().length} indexed`;
-            canvasEl.style.height  = `${visibleEntries.length * RESULT_ROW_HEIGHT}px`;
+            canvasEl.style.height = `${visibleEntries.length * RESULT_ROW_HEIGHT}px`;
             canvasEl.style.display = visibleEntries.length ? "block" : "none";
-            emptyEl.style.display  = visibleEntries.length ? "none"  : "block";
+            emptyEl.style.display = visibleEntries.length ? "none" : "block";
             scheduleVirtualRender(true);
         };
 
         const refreshDebounced = debounce(() => refreshResults(true), 40, false);
 
-        // ── ResizeObserver: store real height so render never uses stale 0 ──────
+        // ── ResizeObserver ──
         let viewportH = 0;
         if (typeof ResizeObserver !== "undefined") {
-            tab.ro = new ResizeObserver(entries => {
+            this.ro = new ResizeObserver(entries => {
                 viewportH = entries[0].contentRect.height;
                 scheduleVirtualRender();
             });
-            tab.ro.observe(viewportEl);
+            this.ro.observe(viewportEl);
         }
 
         // ── Event listeners ───────────────────────────────────────────────────
         inputEl.addEventListener("input", () => { query = inputEl.value; selectedIndex = 0; refreshDebounced(); });
         inputEl.addEventListener("keydown", (e) => {
             if (!visibleEntries.length) return;
-            if (e.key === "ArrowDown")  { e.preventDefault(); setSelectedIndex(selectedIndex + 1, true); }
+            if (e.key === "ArrowDown") { e.preventDefault(); setSelectedIndex(selectedIndex + 1, true); }
             else if (e.key === "ArrowUp") { e.preventDefault(); setSelectedIndex(selectedIndex - 1, true); }
-            else if (e.key === "Enter")   { e.preventDefault(); const sel = visibleEntries[selectedIndex]; if (sel) openEntry(sel); }
+            else if (e.key === "Enter") { e.preventDefault(); const sel = visibleEntries[selectedIndex]; if (sel) openEntry(sel); }
         });
         typeButtonEl.addEventListener("click", (e) => {
             e.preventDefault(); e.stopPropagation();
             new TypePickerModal(this.app, this.plugin.getTypeOptions(), new Set(selectedTypes), (keys) => {
                 selectedTypes = keys; updateTypeButton(); selectedIndex = 0; refreshResults(true);
+                saveSearchState();
             }).open();
         });
         sourceButtonEl.addEventListener("click", (e) => {
             e.preventDefault(); e.stopPropagation();
-            new SourcePickerModal(this.app, this.plugin.getSourceOptions(), new Set(selectedSources), (keys) => {
+            new SourcePickerModal(this.app, this.plugin, () => this.plugin.getSourceOptions(), new Set(selectedSources), (keys) => {
                 selectedSources = keys; updateSourceButton(); selectedIndex = 0; refreshResults(true);
+                saveSearchState();
             }).open();
         });
-        sortSelectEl.addEventListener("change", () => { sortMode = sortSelectEl.value; refreshResults(false); });
+        sortSelectEl.addEventListener("change", () => {
+            sortMode = sortSelectEl.value;
+            refreshResults(false);
+            saveSearchState();
+        });
         bookmarksBtn.addEventListener("click", () => {
             showBookmarks = !showBookmarks;
             updateBookmarksButton(); selectedIndex = 0; refreshResults(true);
+            saveSearchState();
         });
         manageBtn.addEventListener("click", () => new BookmarkManagerModal(this.app, this.plugin).open());
         clearSrcBtn.addEventListener("click", () => {
-            selectedSources = new Set(); updateSourceButton(); selectedIndex = 0; refreshResults(true);
+            selectedSources = new Set();
+            if (presetSelectEl) presetSelectEl.value = "";
+            updateSourceButton(); selectedIndex = 0; refreshResults(true);
+            saveSearchState();
+        });
+        presetSelectEl.addEventListener("change", () => {
+            const preset = this.plugin.getFilterPresets().find((p) => p.id === presetSelectEl.value);
+            if (!preset) return;
+            const validSources = new Set(this.plugin.getSourceOptions().map((o) => o.key));
+            const validTypes = new Set(this.plugin.getTypeOptions().map((o) => o.key));
+            selectedSources = new Set((preset.sources || []).map(normalizeKey).filter((k) => validSources.has(k)));
+            selectedTypes = new Set((preset.types || []).map(normalizeKey).filter((k) => validTypes.has(k)));
+            updateSourceButton();
+            updateTypeButton();
+            selectedIndex = 0;
+            refreshResults(true);
+            saveSearchState();
         });
         spellbookBtn.addEventListener("click", () => this.plugin.openSpellbookModal(getSnapshot()));
         popInBtn.addEventListener("click", () => {
-            // Close this search tab and open the search as a normal modal.
             const snap = Object.assign({}, getSnapshot(), { forceModal: true });
-            this._closeTab(tab.id);
+            this.leaf.detach();
             this.plugin.openSearchModal(snap);
         });
         viewportEl.addEventListener("scroll", () => scheduleVirtualRender(), { passive: true });
 
         if (initialState?.scrollTop) {
-            requestAnimationFrame(() => requestAnimationFrame(() => { viewportEl.scrollTop = initialState.scrollTop; }));
+            win.requestAnimationFrame(() => win.requestAnimationFrame(() => { viewportEl.scrollTop = initialState.scrollTop; }));
         }
 
+        this.refreshResults = refreshResults;
         updateTypeButton(); updateSourceButton(); updateBookmarksButton();
         refreshResults(false);
         window.setTimeout(() => inputEl.focus(), 0);
     }
 
-    // ── Called externally by openReaderInWindow (pop out from modal reader) ────
-    setReaderState(entries, initialIndex, searchState, sourceMode = "window") {
-        const list = Array.isArray(entries) ? entries : [];
-        const safeIndex = Math.max(0, Math.min(typeof initialIndex === "number" ? initialIndex : 0, Math.max(0, list.length - 1)));
-        const activeEntry = list[safeIndex] || list[0] || null;
-        this.displayTitle = (activeEntry && (activeEntry.collectionName || activeEntry.displayName)) || "TTRPG";
+}
 
-        // sourceMode controls the reader transfer button:
-        //   "native" => normal workspace tab, show ⤢ Pop Out
-        //   "window" => detached/pop-out window, show ⤡ Pop In
-        // Older applicators passed true for native; keep that compatible.
-        const mode = sourceMode === true ? "native" : (sourceMode || "window");
+const TTRPG_BESTIARY_VIEW_TYPE = "ttrpg-bestiary-view";
 
-        if (!this._tabBodyEl || !this._tabBarEl || !this._tabBodyEl.isConnected) {
-            this.contentEl.empty();
-            this.contentEl.addClass("ttrpg-popout-view");
-            this._tabBarEl = this.contentEl.createDiv({ cls: "ttrpg-popout__tabbar" });
-            this._tabBarEl.style.display = "none";
-            this._tabBodyEl = this.contentEl.createDiv({ cls: "ttrpg-popout__body" });
-        }
-
-        this._resetTabs();
-        this._addReaderTab(list, safeIndex, searchState, { sourceMode: mode });
+class TTRPGBestiaryView extends ItemView {
+    constructor(leaf, plugin) {
+        super(leaf);
+        this.plugin = plugin;
+        this.controller = null;
+        this.initialState = null;
+        this.hoverPopover = null;
     }
+    getViewType() { return TTRPG_BESTIARY_VIEW_TYPE; }
+    getDisplayText() { return "TTRPG Bestiary"; }
+    getIcon() { return "swords"; }
+    async onOpen() {
+        this.plugin.registerModal(this);
+        this.contentEl.empty();
+        this.contentEl.addClass("ttrpg-bestiary-popout-view");
+        this.contentEl.style.height = "100%";
+        this.contentEl.style.overflow = "hidden";
 
-    async onClose() {
-        for (const tab of this.tabs) {
-            if (tab.ro)     { tab.ro.disconnect(); tab.ro = null; }
-            if (tab.engine) { tab.engine.destroy(); tab.engine = null; }
+        this.controller = new TTRPGBestiaryController(this.app, this.plugin, {
+            containerEl: this.contentEl,
+            isPopout: true,
+            parentComponent: this,
+            onClose: () => {
+                this.leaf.detach();
+            },
+            initialState: this.initialState
+        });
+        this.controller.build();
+    }
+    initBestiaryView(initialState) {
+        this.initialState = initialState;
+        if (this.controller) {
+            this.controller.loadState(initialState);
+            this.controller.build();
         }
-        this.tabs = [];
+    }
+    async onClose() {
+        if (this.plugin.settings.saveLastBestiarySearch && this.controller) {
+            const snap = this.controller.getStateSnapshot();
+            this.plugin._cachedBestiarySearchState = snap;
+            this.plugin.settings.lastBestiarySearchState = snap;
+            void this.plugin.saveSettings(false);
+        }
+        if (this.controller) {
+            this.controller = null;
+        }
         this.plugin.unregisterModal(this);
     }
-
     handleBookmarksChanged() {
-        for (const tab of this.tabs) {
-            if (tab.engine) tab.engine.handleBookmarksChanged();
+        if (this.controller) this.controller.handleBookmarksChanged();
+    }
+    refreshFromPlugin() {
+        if (this.controller) this.controller.handleBookmarksChanged();
+    }
+}
+
+class TTRPGSpellbookView extends ItemView {
+    constructor(leaf, plugin) {
+        super(leaf);
+        this.plugin = plugin;
+        this.controller = null;
+        this.initialState = null;
+        this.hoverPopover = null;
+    }
+    getViewType() { return TTRPG_SPELLBOOK_VIEW_TYPE; }
+    getDisplayText() { return "TTRPG Spellbook"; }
+    getIcon() { return "book-open"; }
+    async onOpen() {
+        this.plugin.registerModal(this);
+        this.contentEl.empty();
+        this.contentEl.addClass("ttrpg-spellbook-popout-view");
+        this.contentEl.style.height = "100%";
+        this.contentEl.style.overflow = "hidden";
+
+        this.controller = new TTRPGSpellbookController(this.app, this.plugin, {
+            containerEl: this.contentEl,
+            isPopout: true,
+            parentComponent: this,
+            onClose: () => {
+                this.leaf.detach();
+            },
+            initialState: this.initialState
+        });
+        this.controller.build();
+    }
+    initSpellbookView(initialState) {
+        this.initialState = initialState;
+        if (this.controller) {
+            this.controller.loadState(initialState);
+            this.controller.build();
         }
     }
-
-    refreshFromPlugin() {}
+    async onClose() {
+        if (this.plugin.settings.saveLastSpellbookSearch && this.controller) {
+            const snap = this.controller.getStateSnapshot();
+            this.plugin._cachedSpellbookSearchState = snap;
+            this.plugin.settings.lastSpellbookSearchState = snap;
+            void this.plugin.saveSettings(false);
+        }
+        if (this.controller) {
+            this.controller.destroy();
+            this.controller = null;
+        }
+        this.plugin.unregisterModal(this);
+    }
+    handleBookmarksChanged() {
+        if (this.controller) this.controller.handleBookmarksChanged();
+    }
+    refreshFromPlugin() {
+        if (this.controller) this.controller.refreshFromPlugin();
+    }
 }
 
 
@@ -6486,6 +10186,7 @@ class BookmarkManagerModal extends Modal {
     }
 
     renderGroups() {
+        const doc = this.contentEl.ownerDocument;
         this.groupsEl.replaceChildren();
         const groups = this.plugin.getBookmarkGroups();
         const paths = this.plugin.getBookmarkedPaths();
@@ -6526,7 +10227,7 @@ class BookmarkManagerModal extends Modal {
                 e.preventDefault();
                 clearDropIndicators();
                 const rect = el.getBoundingClientRect();
-                const indicator = document.createElement("div");
+                const indicator = doc.createElement("div");
                 indicator.className = "ttrpg-vs-bm__drop-indicator";
                 if (e.clientY > rect.top + rect.height / 2) el.after(indicator);
                 else el.before(indicator);
@@ -6544,12 +10245,12 @@ class BookmarkManagerModal extends Modal {
         };
 
         // "All" — not draggable
-        const allEl = document.createElement("div");
+        const allEl = doc.createElement("div");
         allEl.className = "ttrpg-vs-bm__group-item" + (this.selectedGroupId === null ? " is-active" : "");
-        const allNameEl = document.createElement("div");
+        const allNameEl = doc.createElement("div");
         allNameEl.className = "ttrpg-vs-bm__group-name";
         allNameEl.textContent = "All bookmarks";
-        const allCountEl = document.createElement("div");
+        const allCountEl = doc.createElement("div");
         allCountEl.className = "ttrpg-vs-bm__group-count";
         allCountEl.textContent = String(paths.length);
         allEl.appendChild(allNameEl);
@@ -6563,12 +10264,12 @@ class BookmarkManagerModal extends Modal {
 
         // "Ungrouped" — not draggable
         if (ungroupedCount > 0) {
-            const unEl = document.createElement("div");
+            const unEl = doc.createElement("div");
             unEl.className = "ttrpg-vs-bm__group-item" + (this.selectedGroupId === "ungrouped" ? " is-active" : "");
-            const unNameEl = document.createElement("div");
+            const unNameEl = doc.createElement("div");
             unNameEl.className = "ttrpg-vs-bm__group-name";
             unNameEl.textContent = "Ungrouped";
-            const unCountEl = document.createElement("div");
+            const unCountEl = doc.createElement("div");
             unCountEl.className = "ttrpg-vs-bm__group-count";
             unCountEl.textContent = String(ungroupedCount);
             unEl.appendChild(unNameEl);
@@ -6584,17 +10285,17 @@ class BookmarkManagerModal extends Modal {
         // Named groups — draggable
         for (const group of groups) {
             const count = paths.filter((p) => this.plugin.getBookmarkGroupForPath(p) === group.id).length;
-            const groupEl = document.createElement("div");
+            const groupEl = doc.createElement("div");
             groupEl.className = "ttrpg-vs-bm__group-item" + (this.selectedGroupId === group.id ? " is-active" : "");
 
             // Drag handle
-            const handleEl = document.createElement("div");
+            const handleEl = doc.createElement("div");
             handleEl.className = "ttrpg-vs-bm__drag-handle";
             handleEl.textContent = "⠿";
             handleEl.title = "Drag to reorder";
             groupEl.appendChild(handleEl);
 
-            const nameEl = document.createElement("div");
+            const nameEl = doc.createElement("div");
             nameEl.className = "ttrpg-vs-bm__group-name";
             nameEl.textContent = group.name;
             nameEl.contentEditable = "false";
@@ -6615,11 +10316,11 @@ class BookmarkManagerModal extends Modal {
                 }, { once: true });
             });
 
-            const countEl = document.createElement("div");
+            const countEl = doc.createElement("div");
             countEl.className = "ttrpg-vs-bm__group-count";
             countEl.textContent = String(count);
 
-            const deleteEl = document.createElement("button");
+            const deleteEl = doc.createElement("button");
             deleteEl.type = "button";
             deleteEl.className = "ttrpg-vs-bm__group-delete";
             deleteEl.textContent = "×";
@@ -6647,6 +10348,7 @@ class BookmarkManagerModal extends Modal {
     }
 
     renderBookmarks() {
+        const doc = this.contentEl.ownerDocument;
         const paths = this.plugin.getBookmarkedPaths();
         const groups = this.plugin.getBookmarkGroups();
 
@@ -6679,7 +10381,7 @@ class BookmarkManagerModal extends Modal {
         this.bookmarkListEl.replaceChildren();
 
         if (!filtered.length) {
-            const emptyEl = document.createElement("div");
+            const emptyEl = doc.createElement("div");
             emptyEl.className = "ttrpg-vs-bm__empty";
             emptyEl.textContent = "No bookmarks here.";
             this.bookmarkListEl.appendChild(emptyEl);
@@ -6726,7 +10428,7 @@ class BookmarkManagerModal extends Modal {
                 e.dataTransfer.dropEffect = "move";
                 clearDropIndicators();
                 const rect = el.getBoundingClientRect();
-                const indicator = document.createElement("div");
+                const indicator = doc.createElement("div");
                 indicator.className = "ttrpg-vs-bm__drop-indicator";
                 if (e.clientY > rect.top + rect.height / 2) el.after(indicator);
                 else el.before(indicator);
@@ -6743,7 +10445,7 @@ class BookmarkManagerModal extends Modal {
             });
         };
 
-        const fragment = document.createDocumentFragment();
+        const fragment = doc.createDocumentFragment();
 
         for (const path of filtered) {
             // For file paths, look up the entry directly.
@@ -6759,37 +10461,61 @@ class BookmarkManagerModal extends Modal {
 
             const groupId = this.plugin.getBookmarkGroupForPath(path);
 
-            const entryEl = document.createElement("div");
+            const entryEl = doc.createElement("div");
             entryEl.className = "ttrpg-vs-bm__entry";
 
             // Drag handle (all single-group views)
             if (isDraggable) {
-                const handleEl = document.createElement("div");
+                const handleEl = doc.createElement("div");
                 handleEl.className = "ttrpg-vs-bm__drag-handle";
                 handleEl.textContent = "⠿";
                 handleEl.title = "Drag to reorder";
                 entryEl.appendChild(handleEl);
             }
 
-            const infoEl = document.createElement("div");
+            const infoEl = doc.createElement("div");
             infoEl.className = "ttrpg-vs-bm__entry-info";
 
-            const nameEl = document.createElement("div");
+            const nameEl = doc.createElement("div");
             nameEl.className = "ttrpg-vs-bm__entry-name";
-            if (entry) {
-                // Show the collection name if this is an adventure/book bookmark (folder path)
-                if (entry.collectionName && entry.collectionPath === path) {
-                    nameEl.textContent = `${entry.collectionName} (${entry.typeLabel})`;
-                } else if (entry.collectionName) {
-                    nameEl.textContent = `${entry.collectionName} – ${entry.displayName}`;
-                } else {
-                    nameEl.textContent = entry.displayName;
-                }
-            } else {
-                nameEl.textContent = path.split("/").pop().replace(/\.md$/i, "");
-            }
+            nameEl.contentEditable = "false";
+            nameEl.title = "Double-click to rename bookmark visually";
+            
+            const displayText = entry
+                ? (entry.collectionName && entry.collectionPath === path
+                    ? `${entry.displayName} (${entry.typeLabel})`
+                    : (entry.collectionName ? `${entry.collectionName} – ${entry.displayName}` : entry.displayName))
+                : path.split("/").pop().replace(/\.md$/i, "");
+            nameEl.textContent = displayText;
 
-            const metaEl = document.createElement("div");
+            const defaultEditText = entry ? entry.displayName : path.split("/").pop().replace(/\.md$/i, "");
+            nameEl.addEventListener("dblclick", () => {
+                nameEl.contentEditable = "true";
+                nameEl.textContent = defaultEditText;
+                nameEl.focus();
+                const sel = window.getSelection();
+                if (sel) sel.selectAllChildren(nameEl);
+                nameEl.addEventListener("blur", async () => {
+                    nameEl.contentEditable = "false";
+                    const newName = (nameEl.textContent || "").trim();
+                    const originalName = entry ? (entry.originalDisplayName || entry.displayName) : path.split("/").pop().replace(/\.md$/i, "");
+                    if (newName === "") {
+                        await this.plugin.setBookmarkDisplayName(path, null);
+                    } else if (newName && newName !== originalName) {
+                        await this.plugin.setBookmarkDisplayName(path, newName);
+                    } else {
+                        this.renderBookmarks();
+                    }
+                }, { once: true });
+                nameEl.addEventListener("keydown", (e) => {
+                    if (e.key === "Enter") {
+                        e.preventDefault();
+                        nameEl.blur();
+                    }
+                });
+            });
+
+            const metaEl = doc.createElement("div");
             metaEl.className = "ttrpg-vs-bm__entry-meta";
             const metaParts = [];
             if (entry) {
@@ -6803,16 +10529,16 @@ class BookmarkManagerModal extends Modal {
             infoEl.appendChild(metaEl);
 
             // Group selector
-            const selectEl = document.createElement("select");
+            const selectEl = doc.createElement("select");
             selectEl.className = "ttrpg-vs-bm__entry-select";
 
-            const noneOpt = document.createElement("option");
+            const noneOpt = doc.createElement("option");
             noneOpt.value = "";
             noneOpt.textContent = "Ungrouped";
             selectEl.appendChild(noneOpt);
 
             for (const group of groups) {
-                const opt = document.createElement("option");
+                const opt = doc.createElement("option");
                 opt.value = group.id;
                 opt.textContent = group.name;
                 selectEl.appendChild(opt);
@@ -6930,21 +10656,22 @@ class TypePickerModal extends Modal {
 
         this.listEl.replaceChildren();
 
+        const doc = this.contentEl.ownerDocument;
         if (!filtered.length) {
-            const emptyEl = document.createElement("div");
+            const emptyEl = doc.createElement("div");
             emptyEl.className = "ttrpg-vs__empty";
             emptyEl.textContent = "No matching types.";
             this.listEl.appendChild(emptyEl);
             return;
         }
 
-        const fragment = document.createDocumentFragment();
+        const fragment = doc.createDocumentFragment();
 
         filtered.forEach((option) => {
-            const labelEl = document.createElement("label");
+            const labelEl = doc.createElement("label");
             labelEl.className = "ttrpg-vs-type__item";
 
-            const checkboxEl = document.createElement("input");
+            const checkboxEl = doc.createElement("input");
             checkboxEl.type = "checkbox";
             checkboxEl.className = "ttrpg-vs-type__checkbox";
             checkboxEl.checked = this.pendingKeys.has(option.key);
@@ -6956,11 +10683,11 @@ class TypePickerModal extends Modal {
                 }
             });
 
-            const nameEl = document.createElement("span");
+            const nameEl = doc.createElement("span");
             nameEl.className = "ttrpg-vs-source__name";
             nameEl.textContent = option.label;
 
-            const countEl = document.createElement("span");
+            const countEl = doc.createElement("span");
             countEl.className = "ttrpg-vs-source__count";
             countEl.textContent = String(option.count);
 
@@ -6985,7 +10712,7 @@ class TTRPGSearchButtonInsertModal extends Modal {
         const list = wrap.createDiv({ cls: "ttrpg-vs-source__list" }); const preview = wrap.createEl("pre"); const buttons = wrap.createDiv({ cls: "ttrpg-vs__button-row" }); const insertBtn = buttons.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Insert button" });
         const getColour = () => { const custom = customColourInput.value.trim(); return custom || (colourSelect.value === "Accent" ? "" : colourSelect.value); }; const setTypeFromEntry = (entry) => { const nextType = entry && entry.typeLabel ? entry.typeLabel : this.selectedType; if (!nextType) return; this.selectedType = nextType; if (!Array.from(typeSelect.options).some((option) => option.value === nextType)) { const opt = document.createElement("option"); opt.value = nextType; opt.textContent = nextType; typeSelect.appendChild(opt); } typeSelect.value = nextType; };
         const renderPreview = () => { const colour = getColour(); const chapter = chapterInput.value.trim(); preview.textContent = "```TTRPG_Search\nType: " + this.selectedType + "\nName: " + (this.selectedName || input.value || "") + (chapter ? "\nChapter: " + chapter : "") + (this.selectedChapterPath ? "\nChapterPath: " + this.selectedChapterPath : "") + (colour ? "\nColour: " + colour : "") + "\n```"; insertBtn.disabled = !(this.selectedName || input.value.trim()); };
-        const renderList = () => { this.selectedType = typeSelect.value || "Any"; const query = input.value.trim(); const entries = this.plugin.getTTRPGSearchButtonCandidates(this.selectedType, query).slice(0, 40); list.replaceChildren(); for (const item of entries) { const btn = document.createElement("button"); btn.type = "button"; btn.className = "ttrpg-vs-source__item"; const name = item.label; const nameEl = btn.createDiv({ cls: "ttrpg-vs-source__name", text: name }); nameEl.title = name; const metaText = [item.entry.typeLabel, item.entry.sourceLabel].filter(Boolean).join(" • " ); const metaEl = btn.createDiv({ cls: "ttrpg-vs-source__count", text: metaText }); metaEl.title = metaText; btn.addEventListener("click", () => { setTypeFromEntry(item.entry); this.selectedName = name; input.value = name; chapterInput.value = ""; this.selectedChapter = ""; this.selectedChapterPath = ""; renderChapterList(); renderPreview(); }); list.appendChild(btn); } renderPreview(); };
+        const renderList = () => { this.selectedType = typeSelect.value || "Any"; const query = input.value.trim(); const entries = this.plugin.getTTRPGSearchButtonCandidates(this.selectedType, query).slice(0, 40); list.replaceChildren(); for (const item of entries) { const btn = document.createElement("button"); btn.type = "button"; btn.className = "ttrpg-vs-source__item"; const name = item.label; const nameEl = btn.createDiv({ cls: "ttrpg-vs-source__name", text: name }); nameEl.title = name; const metaText = [item.entry.typeLabel, item.entry.sourceLabel].filter(Boolean).join(" • "); const metaEl = btn.createDiv({ cls: "ttrpg-vs-source__count", text: metaText }); metaEl.title = metaText; btn.addEventListener("click", () => { setTypeFromEntry(item.entry); this.selectedName = name; input.value = name; chapterInput.value = ""; this.selectedChapter = ""; this.selectedChapterPath = ""; renderChapterList(); renderPreview(); }); list.appendChild(btn); } renderPreview(); };
         const renderChapterList = () => { if (!this.plugin.isTTRPGBookOrAdventureType(this.selectedType) || !(this.selectedName || input.value.trim())) return; const chapterQuery = chapterInput.value.trim(); const chapters = this.plugin.getTTRPGSearchChapterCandidates(this.selectedType, this.selectedName || input.value.trim(), chapterQuery).slice(0, 40); if (!chapterQuery && chapters.length) return; list.replaceChildren(); for (const item of chapters) { const btn = document.createElement("button"); btn.type = "button"; btn.className = "ttrpg-vs-source__item"; const nameEl = btn.createDiv({ cls: "ttrpg-vs-source__name", text: item.label }); nameEl.title = item.path || item.label; btn.createDiv({ cls: "ttrpg-vs-source__count", text: item.path || "Chapter" }); btn.addEventListener("click", () => { chapterInput.value = item.baseLabel || item.label; this.selectedChapter = item.baseLabel || item.label; this.selectedChapterPath = item.path || ""; renderPreview(); }); list.appendChild(btn); } renderPreview(); };
         typeSelect.addEventListener("change", () => { this.selectedType = typeSelect.value || "Any"; this.selectedName = ""; input.value = ""; chapterInput.value = ""; this.selectedChapterPath = ""; renderList(); }); input.addEventListener("input", () => { this.selectedName = input.value.trim(); chapterInput.value = ""; this.selectedChapterPath = ""; renderList(); }); chapterInput.addEventListener("input", () => { this.selectedChapterPath = ""; renderChapterList(); }); colourSelect.addEventListener("change", renderPreview); customColourInput.addEventListener("input", renderPreview); insertBtn.addEventListener("click", () => { const name = this.selectedName || input.value.trim(); if (!name) return; const chapter = chapterInput.value.trim(); const colour = getColour(); const block = "```TTRPG_Search\nType: " + this.selectedType + "\nName: " + name + (chapter ? "\nChapter: " + chapter : "") + (this.selectedChapterPath ? "\nChapterPath: " + this.selectedChapterPath : "") + (colour ? "\nColour: " + colour : "") + "\n```"; this.editor.replaceSelection(block); this.close(); });
         renderList(); window.setTimeout(() => input.focus(), 0);
@@ -6996,7 +10723,7 @@ class TTRPGSearchEmbedSuggest extends EditorSuggest {
     constructor(app, plugin) { super(app); this.plugin = plugin; this.context = null; }
     onTrigger(cursor, editor) { const line = editor.getLine(cursor.line).slice(0, cursor.ch); const typeMatch = line.match(/^\s*Type:\s*(.*)$/i); const nameMatch = line.match(/^\s*Name:\s*(.*)$/i); const chapterMatch = line.match(/^\s*Chapter:\s*(.*)$/i); const colourMatch = line.match(/^\s*(?:Colour|Color):\s*(.*)$/i); if (!typeMatch && !nameMatch && !chapterMatch && !colourMatch) return null; let blockHasFence = false; let blockType = "Any"; let blockName = ""; let fenceLine = -1; let typeLine = -1; let chapterPathLine = -1; for (let ln = cursor.line; ln >= Math.max(0, cursor.line - 30); ln--) { const value = editor.getLine(ln); if (/^```TTRPG_Search/i.test(value.trim())) { blockHasFence = true; fenceLine = ln; break; } const foundType = value.match(/^\s*Type:\s*(.+)$/i); if (foundType) { blockType = foundType[1].trim(); typeLine = ln; } const foundName = value.match(/^\s*Name:\s*(.+)$/i); if (foundName) blockName = foundName[1].trim(); if (/^\s*ChapterPath:/i.test(value)) chapterPathLine = ln; } if (!blockHasFence) return null; if (typeMatch) typeLine = cursor.line; const query = (typeMatch ? typeMatch[1] : nameMatch ? nameMatch[1] : chapterMatch ? chapterMatch[1] : colourMatch[1]) || ""; const startCh = cursor.ch - query.length; this.context = { mode: typeMatch ? "type" : nameMatch ? "name" : chapterMatch ? "chapter" : "colour", query, type: blockType, name: blockName, fenceLine, typeLine, chapterPathLine, start: { line: cursor.line, ch: startCh }, end: cursor, editor }; return this.context; }
     getSuggestions(context) { const query = String(context.query || "").trim(); if (context.mode === "colour") return this.plugin.getTTRPGSearchButtonColours().filter((c) => !query || c.label.toLowerCase().includes(query.toLowerCase()) || c.value.toLowerCase().includes(query.toLowerCase())).map((c) => ({ kind: "colour", label: c.label, value: c.value })).slice(0, 30); if (context.mode === "type") return this.plugin.getTTRPGSearchEmbedTypes().filter((t) => !query || t.label.toLowerCase().includes(query.toLowerCase())).slice(0, 30).map((t) => ({ kind: "type", label: t.label })); if (context.mode === "chapter") return this.plugin.getTTRPGSearchChapterCandidates(context.type, context.name, query).slice(0, 30).map((x) => ({ kind: "chapter", label: x.label, entry: x.entry, path: x.path, baseLabel: x.baseLabel, score: x.score })); return this.plugin.getTTRPGSearchButtonCandidates(context.type, query).slice(0, 30).map((x) => ({ kind: "entry", label: x.label, entry: x.entry, score: x.score })); }
-    renderSuggestion(item, el) { el.createDiv({ cls: "ttrpg-vs-source__name", text: item.kind === "colour" && item.value ? item.label + " (" + item.value + ")" : item.label }); if (item.path) el.createDiv({ cls: "ttrpg-vs-source__meta", text: item.path }); else if (item.entry) { const meta = [item.entry.typeLabel, item.entry.sourceLabel].filter(Boolean).join(" • " ); if (meta) el.createDiv({ cls: "ttrpg-vs-source__meta", text: meta }); } }
+    renderSuggestion(item, el) { el.createDiv({ cls: "ttrpg-vs-source__name", text: item.kind === "colour" && item.value ? item.label + " (" + item.value + ")" : item.label }); if (item.path) el.createDiv({ cls: "ttrpg-vs-source__meta", text: item.path }); else if (item.entry) { const meta = [item.entry.typeLabel, item.entry.sourceLabel].filter(Boolean).join(" • "); if (meta) el.createDiv({ cls: "ttrpg-vs-source__meta", text: meta }); } }
     updateTypeLineForEntry(entry) { if (!this.context || !entry || !entry.typeLabel) return; const editor = this.context.editor; const nextTypeLineText = "Type: " + entry.typeLabel; if (this.context.typeLine >= 0) { editor.replaceRange(nextTypeLineText, { line: this.context.typeLine, ch: 0 }, { line: this.context.typeLine, ch: editor.getLine(this.context.typeLine).length }); return; } const insertLine = this.context.fenceLine >= 0 ? this.context.fenceLine + 1 : this.context.start.line; editor.replaceRange(nextTypeLineText + "\n", { line: insertLine, ch: 0 }); }
     updateChapterPathLine(path) { if (!this.context || !path) return; const editor = this.context.editor; const lineText = "ChapterPath: " + path; if (this.context.chapterPathLine >= 0) { editor.replaceRange(lineText, { line: this.context.chapterPathLine, ch: 0 }, { line: this.context.chapterPathLine, ch: editor.getLine(this.context.chapterPathLine).length }); return; } editor.replaceRange("\n" + lineText, this.context.end); }
     selectSuggestion(item) { if (!this.context) return; const replacement = item.kind === "colour" ? (item.value || item.label) : (item.kind === "chapter" ? (item.baseLabel || item.label) : item.label); this.context.editor.replaceRange(replacement, this.context.start, this.context.end); if (this.context.mode === "name" && item.entry) this.updateTypeLineForEntry(item.entry); if (this.context.mode === "chapter" && item.path) this.updateChapterPathLine(item.path); }
@@ -7008,15 +10735,138 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
         this.plugin = plugin;
     }
 
+    /**
+     * Creates a collapsible settings group (details/summary) with premium styling.
+     * @param {HTMLElement} containerEl - Parent container element
+     * @param {string} title - Group title
+     * @param {string} icon - Emoji icon shown before the title
+     * @param {boolean} open - Whether to start expanded
+     * @returns {HTMLElement} The inner content div to append settings to
+     */
+    createSettingsGroup(containerEl, title, icon = "⚙️", open = false) {
+        const details = containerEl.createEl("details", { cls: "ttrpg-settings-group" });
+        if (open) details.open = true;
+        const summary = details.createEl("summary", { cls: "ttrpg-settings-group-title" });
+        summary.createSpan({ cls: "ttrpg-settings-group-icon", text: icon });
+        summary.createSpan({ text: " " + title });
+        const content = details.createDiv({ cls: "ttrpg-settings-group-content" });
+        return content;
+    }
+
     renderSourceChipSettings(containerEl) {
-        const details = containerEl.createEl("details");
-        details.createEl("summary", { text: "Source chip labels & colours" });
+        const details = containerEl.createEl("details", { cls: "ttrpg-settings-subdetails" });
+        details.createEl("summary", { cls: "ttrpg-settings-subdetails-title", text: "Source chip labels & colours" });
         details.createEl("p", { text: "Collapsed by default because this list can be long. Chip labels are per raw source key, so duplicate visible labels do not merge filters." });
         const options = this.plugin.getSourceOptions();
         if (!options.length) return;
         const managerEl = details.createDiv({ cls: "ttrpg-vs-source-chip-manager" });
         for (const option of options) {
-            const data=this.plugin.getSourceChipData(option.key); const row=managerEl.createDiv({cls:"ttrpg-vs-source-chip-manager__row"}); row.createDiv({cls:"ttrpg-vs-source-chip-manager__original", text:`${option.rawLabel || option.label} (${option.count})`}); const labelInput=row.createEl("input",{cls:"ttrpg-vs-source-chip-manager__input"}); labelInput.type="text"; labelInput.value=data.label||option.label; const colorInput=row.createEl("input",{cls:"ttrpg-vs-source-chip-manager__input"}); colorInput.type="color"; colorInput.value=/^#[0-9a-f]{6}$/i.test(data.color||"")?data.color:"#7c3aed"; const saveBtn=row.createEl("button",{cls:"ttrpg-vs__toolbutton", text:"Save"}); saveBtn.type="button"; saveBtn.addEventListener("click", async()=>{ await this.plugin.updateSourceChip(option.key, option.rawLabel || option.label, labelInput.value, colorInput.value); this.display(); }); const resetBtn=row.createEl("button",{cls:"ttrpg-vs__toolbutton", text:"Reset"}); resetBtn.type="button"; resetBtn.addEventListener("click", async()=>{ await this.plugin.resetSourceChip(option.key); this.display(); });
+            const data = this.plugin.getSourceChipData(option.key); const row = managerEl.createDiv({ cls: "ttrpg-vs-source-chip-manager__row" }); row.createDiv({ cls: "ttrpg-vs-source-chip-manager__original", text: `${option.rawLabel || option.label} (${option.count})` }); const labelInput = row.createEl("input", { cls: "ttrpg-vs-source-chip-manager__input" }); labelInput.type = "text"; labelInput.value = data.label || option.label; const colorInput = row.createEl("input", { cls: "ttrpg-vs-source-chip-manager__input" }); colorInput.type = "color"; colorInput.value = /^#[0-9a-f]{6}$/i.test(data.color || "") ? data.color : "#7c3aed"; const saveBtn = row.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Save" }); saveBtn.type = "button"; saveBtn.addEventListener("click", async () => { await this.plugin.updateSourceChip(option.key, option.rawLabel || option.label, labelInput.value, colorInput.value); this.display(); }); const resetBtn = row.createEl("button", { cls: "ttrpg-vs__toolbutton", text: "Reset" }); resetBtn.type = "button"; resetBtn.addEventListener("click", async () => { await this.plugin.resetSourceChip(option.key); this.display(); });
+        }
+    }
+
+    renderExclusionSettings(containerEl) {
+        const details = containerEl.createEl("details", { cls: "ttrpg-settings-subdetails" });
+        details.createEl("summary", { cls: "ttrpg-settings-subdetails-title", text: "Metadata exclusions (per-modal)" });
+        details.createEl("p", {
+            text: "Exclude files from specific search modals based on frontmatter property values. " +
+                "For example, exclude entries where 'type' is 'NPC' from the Bestiary but keep them in general search."
+        });
+
+        // Gather all known frontmatter property keys for suggestions
+        const allPropertyKeys = new Set();
+        try {
+            const allFiles = this.app.vault.getMarkdownFiles();
+            for (const file of allFiles) {
+                const cache = this.app.metadataCache.getFileCache(file);
+                if (cache && cache.frontmatter) {
+                    for (const key of Object.keys(cache.frontmatter)) {
+                        if (key !== "position") allPropertyKeys.add(key);
+                    }
+                }
+                if (allPropertyKeys.size > 200) break; // cap for performance
+            }
+        } catch (e) { /* ignore */ }
+        const propertySuggestions = [...allPropertyKeys].sort();
+
+        const sections = [
+            { key: "searchExclusions", label: "Search modal exclusions" },
+            { key: "bestiaryExclusions", label: "Bestiary exclusions" },
+            { key: "spellbookExclusions", label: "Spellbook exclusions" },
+        ];
+
+        for (const section of sections) {
+            const sectionEl = details.createDiv();
+            sectionEl.style.cssText = "margin: 12px 0 16px; padding: 10px; border: 1px solid var(--background-modifier-border); border-radius: 8px;";
+            sectionEl.createEl("h4", { text: section.label });
+
+            if (!Array.isArray(this.plugin.settings[section.key])) {
+                this.plugin.settings[section.key] = [];
+            }
+            const exclusions = this.plugin.settings[section.key];
+
+            const listEl = sectionEl.createDiv();
+            listEl.style.cssText = "display: flex; flex-direction: column; gap: 6px;";
+
+            const renderRows = () => {
+                listEl.empty();
+                for (let i = 0; i < exclusions.length; i++) {
+                    const rule = exclusions[i];
+                    const row = listEl.createDiv();
+                    row.style.cssText = "display: flex; gap: 6px; align-items: center;";
+
+                    const propInput = row.createEl("input", { attr: { type: "text", placeholder: "property name", list: `ttrpg-excl-props-${section.key}` } });
+                    propInput.style.cssText = "flex: 1; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-primary); color: var(--text-normal); font-size: 13px;";
+                    propInput.value = rule.property || "";
+
+                    const colonEl = row.createSpan({ text: ":" });
+                    colonEl.style.cssText = "font-weight: 700; color: var(--text-muted);";
+
+                    const valInput = row.createEl("input", { attr: { type: "text", placeholder: "value to exclude" } });
+                    valInput.style.cssText = "flex: 1; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-primary); color: var(--text-normal); font-size: 13px;";
+                    valInput.value = rule.value || "";
+
+                    const saveRule = async () => {
+                        rule.property = propInput.value.trim();
+                        rule.value = valInput.value.trim();
+                        // Clear caches so exclusions take effect immediately
+                        this.plugin._bestiaryEntriesCache = null;
+                        this.plugin._spellEntriesCache = null;
+                        await this.plugin.saveSettings(false);
+                    };
+                    propInput.addEventListener("change", saveRule);
+                    valInput.addEventListener("change", saveRule);
+
+                    const removeBtn = row.createEl("button", { text: "✕" });
+                    removeBtn.type = "button";
+                    removeBtn.style.cssText = "padding: 2px 8px; border-radius: 6px; cursor: pointer; border: 1px solid var(--background-modifier-border); background: var(--background-secondary); color: var(--text-muted); font-size: 14px;";
+                    removeBtn.title = "Remove this exclusion";
+                    removeBtn.addEventListener("click", async () => {
+                        exclusions.splice(i, 1);
+                        this.plugin._bestiaryEntriesCache = null;
+                        this.plugin._spellEntriesCache = null;
+                        await this.plugin.saveSettings(false);
+                        renderRows();
+                    });
+                }
+            };
+
+            renderRows();
+
+            // Datalist for property suggestions
+            const datalist = sectionEl.createEl("datalist", { attr: { id: `ttrpg-excl-props-${section.key}` } });
+            for (const prop of propertySuggestions) {
+                datalist.createEl("option", { attr: { value: prop } });
+            }
+
+            const addBtn = sectionEl.createEl("button", { text: "+ Add exclusion" });
+            addBtn.type = "button";
+            addBtn.style.cssText = "margin-top: 6px; padding: 4px 12px; border-radius: 6px; cursor: pointer; border: 1px solid var(--background-modifier-border); background: var(--background-secondary); color: var(--text-normal); font-size: 13px;";
+            addBtn.addEventListener("click", async () => {
+                exclusions.push({ property: "", value: "" });
+                await this.plugin.saveSettings(false);
+                renderRows();
+            });
         }
     }
 
@@ -7024,9 +10874,19 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
         const { containerEl } = this;
         containerEl.empty();
 
-        containerEl.createEl("h2", { text: "TTRPG Vault Search" });
+        // ── Header ───────────────────────────────────────────────────────────
+        const header = containerEl.createDiv({ cls: "ttrpg-settings-header" });
+        header.style.cssText = "display:flex;align-items:center;gap:12px;padding:16px 0 8px;margin-bottom:12px;border-bottom:2px solid var(--background-modifier-border);";
+        const logo = header.createSpan({ text: "⚔️" });
+        logo.style.cssText = "font-size:28px;line-height:1;";
+        const headerText = header.createDiv();
+        headerText.createEl("h2", { text: "TTRPG Vault Search", cls: "ttrpg-settings-h2" }).style.cssText = "margin:0 0 2px;font-size:20px;";
+        headerText.createEl("p", { text: "Configure search, pop-out windows, integrations, encounters, and more.", cls: "ttrpg-settings-subtitle" }).style.cssText = "margin:0;font-size:12px;color:var(--text-muted);";
 
-        new Setting(containerEl)
+        // ── 1. Indexing & Search ─────────────────────────────────────────────
+        const grpSearch = this.createSettingsGroup(containerEl, "Indexing & Search", "🔍", true);
+
+        new Setting(grpSearch)
             .setName("Indexed folders")
             .setDesc("One folder per line or comma-separated. Leave empty to auto-detect.")
             .addTextArea((text) => {
@@ -7039,7 +10899,7 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                 });
             });
 
-        new Setting(containerEl)
+        new Setting(grpSearch)
             .setName("Maximum results")
             .setDesc("Maximum number of results shown in the search modal.")
             .addText((text) => {
@@ -7056,14 +10916,14 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                     this.plugin.settings.maxResults = parsed;
                     await this.plugin.saveSettings(false);
                 });
-                const warning = text.inputEl.parentElement || containerEl;
+                const warning = text.inputEl.parentElement || grpSearch;
                 const warnEl = document.createElement("div");
                 warnEl.style.cssText = "font-size:11px;color:var(--text-warning,#e8a020);max-width:240px;margin-top:4px;";
                 warnEl.textContent = "⚠ Values above 500 may cause noticeable lag on large vaults.";
                 warning.appendChild(warnEl);
             });
 
-        new Setting(containerEl)
+        new Setting(grpSearch)
             .setName("Search titles only (default)")
             .setDesc("When enabled, searching only scans entry titles and collection names. Disable to also search file paths, aliases, and metadata fields.")
             .addToggle((toggle) => {
@@ -7075,7 +10935,7 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                     });
             });
 
-        new Setting(containerEl)
+        new Setting(grpSearch)
             .setName("Default sort mode")
             .setDesc("Default sort mode for the search modal.")
             .addDropdown((dropdown) => {
@@ -7091,7 +10951,71 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                     });
             });
 
-        new Setting(containerEl)
+        new Setting(grpSearch)
+            .setName("Spell tag prefix")
+            .setDesc(
+                "Tag path prefix used by your vault generator for spell metadata. " +
+                "E.g. 'ttrpg-cli' reads tags like ttrpg-cli/spell/school/Evocation. " +
+                "Rebuild the index after changing this."
+            )
+            .addText((text) => {
+                text.setPlaceholder("ttrpg-cli")
+                    .setValue(this.plugin.settings.spellTagPrefix || "ttrpg-cli")
+                    .onChange(async (value) => {
+                        this.plugin.settings.spellTagPrefix = value.trim() || "ttrpg-cli";
+                        await this.plugin.saveSettings(false);
+                    });
+            });
+
+        new Setting(grpSearch)
+            .setName("Manual rebuild")
+            .setDesc("Force a full reindex of the vault immediately.")
+            .addButton((button) => {
+                button.setButtonText("Rebuild index").onClick(() => {
+                    this.plugin.buildIndex(true);
+                });
+            });
+
+        // ── 2. Session Restore ───────────────────────────────────────────────
+        const grpSession = this.createSettingsGroup(containerEl, "Session Restore", "💾", false);
+
+        new Setting(grpSession)
+            .setName("Save last search")
+            .setDesc("Re-opening the search modal restores the last query, filters, and scroll position.")
+            .addToggle((toggle) => {
+                toggle.setValue(this.plugin.settings.saveLastSearch).onChange(async (value) => {
+                    this.plugin.settings.saveLastSearch = value;
+                    if (!value) this.plugin.settings.lastSearchState = null;
+                    await this.plugin.saveSettings(false);
+                });
+            });
+
+        new Setting(grpSession)
+            .setName("Save last spellbook search")
+            .setDesc("Re-opening the spellbook restores the last query, filters, and scroll position.")
+            .addToggle((toggle) => {
+                toggle.setValue(this.plugin.settings.saveLastSpellbookSearch).onChange(async (value) => {
+                    this.plugin.settings.saveLastSpellbookSearch = value;
+                    if (!value) this.plugin.settings.lastSpellbookSearchState = null;
+                    await this.plugin.saveSettings(false);
+                });
+            });
+
+        new Setting(grpSession)
+            .setName("Save last bestiary search")
+            .setDesc("Re-opening the bestiary restores the last query, filters, scroll position, pop-out state, and encounter collapse state.")
+            .addToggle((toggle) => {
+                toggle.setValue(this.plugin.settings.saveLastBestiarySearch).onChange(async (value) => {
+                    this.plugin.settings.saveLastBestiarySearch = value;
+                    if (!value) this.plugin.settings.lastBestiarySearchState = null;
+                    await this.plugin.saveSettings(false);
+                });
+            });
+
+        // ── 3. Pop-out Window Settings ───────────────────────────────────────
+        const grpPopout = this.createSettingsGroup(containerEl, "Pop-out Window Settings", "🪟", true);
+
+        new Setting(grpPopout)
             .setName("Open in new leaf by default")
             .setDesc("Used for direct file opens outside the reader.")
             .addToggle((toggle) => {
@@ -7103,18 +11027,94 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                     });
             });
 
-
-        new Setting(containerEl)
+        new Setting(grpPopout)
             .setName("Open search in pop-out by default")
             .setDesc("When enabled, the search command/ribbon opens directly in a pop-out window.")
             .addToggle((toggle) => toggle.setValue(this.plugin.settings.openSearchInPopoutByDefault !== false).onChange(async (value) => { this.plugin.settings.openSearchInPopoutByDefault = value; await this.plugin.saveSettings(false); }));
 
-        new Setting(containerEl)
+        new Setting(grpPopout)
             .setName("Open reader in pop-out by default")
             .setDesc("When enabled, selecting a result opens the reader in a pop-out window by default.")
             .addToggle((toggle) => toggle.setValue(!!this.plugin.settings.openReaderInPopoutByDefault).onChange(async (value) => { this.plugin.settings.openReaderInPopoutByDefault = value; await this.plugin.saveSettings(false); }));
 
-        new Setting(containerEl)
+        new Setting(grpPopout)
+            .setName("Open spellbook in pop-out by default")
+            .setDesc("When enabled, the spellbook opens directly in a pop-out window.")
+            .addToggle((toggle) => toggle.setValue(!!this.plugin.settings.openSpellbookInPopoutByDefault).onChange(async (value) => { this.plugin.settings.openSpellbookInPopoutByDefault = value; await this.plugin.saveSettings(false); }));
+
+        new Setting(grpPopout)
+            .setName("Open bestiary in pop-out by default")
+            .setDesc("When enabled, the bestiary opens directly in a pop-out window.")
+            .addToggle((toggle) => toggle.setValue(!!this.plugin.settings.openBestiaryInPopoutByDefault).onChange(async (value) => { this.plugin.settings.openBestiaryInPopoutByDefault = value; await this.plugin.saveSettings(false); }));
+
+        // ── 4. Integrations ──────────────────────────────────────────────────
+        const grpIntegrations = this.createSettingsGroup(containerEl, "Integrations", "🔗", false);
+
+        new Setting(grpIntegrations)
+            .setName("Enable Initiative Tracker integration")
+            .setDesc("When enabled, integrates with the Initiative Tracker plugin to load saved parties, sync player levels, and launch encounters directly into combat.")
+            .addToggle((toggle) => {
+                toggle.setValue(this.plugin.settings.enableInitiativeTrackerIntegration !== false)
+                    .onChange(async (value) => {
+                        this.plugin.settings.enableInitiativeTrackerIntegration = value;
+                        await this.plugin.saveSettings(false);
+                    });
+            });
+
+        new Setting(grpIntegrations)
+            .setName("Enable Fantasy Statblocks integration")
+            .setDesc("When enabled, reads stats, hit dice, initiative modifiers, and tokens/images from the Fantasy Statblocks bestiary if they are missing from local notes.")
+            .addToggle((toggle) => {
+                toggle.setValue(this.plugin.settings.enableFantasyStatblocksIntegration !== false)
+                    .onChange(async (value) => {
+                        this.plugin.settings.enableFantasyStatblocksIntegration = value;
+                        await this.plugin.saveSettings(false);
+                    });
+            });
+
+        // ── 5. Random Encounters ─────────────────────────────────────────────
+        const grpEncounters = this.createSettingsGroup(containerEl, "Random Encounters", "🎲", false);
+
+        new Setting(grpEncounters)
+            .setName("Random encounter minimum CR")
+            .setDesc("Minimum CR of monsters that can be chosen for random encounters.")
+            .addText((text) => {
+                text.setPlaceholder("e.g. 1/8")
+                    .setValue(this.plugin.settings.randomEncounterMinCR || "")
+                    .onChange(async (value) => {
+                        this.plugin.settings.randomEncounterMinCR = value.trim();
+                        await this.plugin.saveSettings(false);
+                    });
+            });
+
+        new Setting(grpEncounters)
+            .setName("Random encounter maximum CR")
+            .setDesc("Maximum CR of monsters that can be chosen for random encounters.")
+            .addText((text) => {
+                text.setPlaceholder("e.g. 20")
+                    .setValue(this.plugin.settings.randomEncounterMaxCR || "")
+                    .onChange(async (value) => {
+                        this.plugin.settings.randomEncounterMaxCR = value.trim();
+                        await this.plugin.saveSettings(false);
+                    });
+            });
+
+        new Setting(grpEncounters)
+            .setName("Random encounter allowed sources")
+            .setDesc("Comma-separated source keys to restrict random encounters to. E.g. 'MM, ToB'. Leave empty to use active sidebar filters.")
+            .addText((text) => {
+                text.setPlaceholder("e.g. MM, VGtM")
+                    .setValue(this.plugin.settings.randomEncounterSources || "")
+                    .onChange(async (value) => {
+                        this.plugin.settings.randomEncounterSources = value.trim();
+                        await this.plugin.saveSettings(false);
+                    });
+            });
+
+        // ── 6. Source Filtering & Presets ────────────────────────────────────
+        const grpSources = this.createSettingsGroup(containerEl, "Source Filtering & Presets", "📚", false);
+
+        new Setting(grpSources)
             .setName("Custom source aliases")
             .setDesc(
                 "Format either 'Canonical Name => alias1, alias2' or 'alias = Canonical Name'. One per line."
@@ -7129,7 +11129,7 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                 });
             });
 
-        new Setting(containerEl)
+        new Setting(grpSources)
             .setName("Forced source overrides")
             .setDesc("Force specific files, folders, types, current sources, names, or globs to use a source. One rule per line: matcher => Source. Matchers: path:, glob:, type:, source:, name:. Bare matchers are treated as paths/contains.")
             .addTextArea((text) => {
@@ -7141,7 +11141,8 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings(false);
                 });
             });
-        new Setting(containerEl)
+
+        new Setting(grpSources)
             .setName("Apply forced source overrides")
             .setDesc("Rebuild the index after editing forced source override rules. This avoids rebuilding the whole vault on every keystroke.")
             .addButton((button) => button.setButtonText("Apply / rebuild index").onClick(async () => {
@@ -7149,9 +11150,7 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                 new Notice("Forced source overrides applied.");
             }));
 
-        this.renderSourceChipSettings(containerEl);
-
-        new Setting(containerEl)
+        new Setting(grpSources)
             .setName("Custom filter presets")
             .setDesc("One preset per line: Name => source1, source2 | type1, type2. Works in normal search and Spellbook.")
             .addTextArea((text) => {
@@ -7169,7 +11168,7 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                 });
             });
 
-        new Setting(containerEl)
+        new Setting(grpSources)
             .setName("Custom folder-to-type mappings")
             .setDesc("Format 'folder1, folder2 => Type'. One per line.")
             .addTextArea((text) => {
@@ -7182,7 +11181,17 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                 });
             });
 
-        new Setting(containerEl)
+        // ── 7. Source Chips & Exclusions ─────────────────────────────────────
+        const grpChips = this.createSettingsGroup(containerEl, "Source Chip Customisation", "🏷️", false);
+        this.renderSourceChipSettings(grpChips);
+
+        const grpExclusions = this.createSettingsGroup(containerEl, "Metadata Exclusion Rules", "🚫", false);
+        this.renderExclusionSettings(grpExclusions);
+
+        // ── 8. Backups & Restoration ─────────────────────────────────────────
+        const grpBackup = this.createSettingsGroup(containerEl, "Settings Backups & Restoration", "☁️", false);
+
+        new Setting(grpBackup)
             .setName("Settings backups")
             .setDesc("Back up TTRPG Search settings/bookmarks/source customisations to a vault folder outside the plugin folder. These backups are intended to survive plugin corruption or replacement.")
             .addToggle((toggle) => toggle.setValue(this.plugin.settings.settingsBackupEnabled !== false).onChange(async (value) => {
@@ -7190,7 +11199,7 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                 await this.plugin.saveSettings(false);
             }));
 
-        new Setting(containerEl)
+        new Setting(grpBackup)
             .setName("Backup folder")
             .setDesc("Vault-relative folder for JSON backups. Keep this outside .obsidian/plugins so plugin corruption or reinstalling does not remove it.")
             .addText((text) => {
@@ -7202,7 +11211,7 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                 });
             });
 
-        new Setting(containerEl)
+        new Setting(grpBackup)
             .setName("Backup frequency")
             .setDesc("How often to create a backup, in hours. Use 24 for daily backups. Set to 0 to disable scheduled backups without changing the toggle.")
             .addText((text) => {
@@ -7217,7 +11226,7 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
                 });
             });
 
-        new Setting(containerEl)
+        new Setting(grpBackup)
             .setName("Backups to keep")
             .setDesc("Oldest backup files are removed after this count. Set to 0 to keep all backups.")
             .addText((text) => {
@@ -7238,44 +11247,6 @@ class TTRPGVaultSearchSettingTab extends PluginSettingTab {
             .addButton((button) => button.setButtonText("Restore…").onClick(() => {
                 new SettingsBackupRestoreModal(this.app, this.plugin).open();
             }));
-
-        new Setting(containerEl)
-            .setName("Save last search")
-            .setDesc(
-                "When enabled, re-opening the search modal restores the last query, filters, and scroll position."
-            )
-            .addToggle((toggle) => {
-                toggle.setValue(this.plugin.settings.saveLastSearch).onChange(async (value) => {
-                    this.plugin.settings.saveLastSearch = value;
-                    if (!value) this.plugin.settings.lastSearchState = null;
-                    await this.plugin.saveSettings(false);
-                });
-            });
-
-        new Setting(containerEl)
-            .setName("Spell tag prefix")
-            .setDesc(
-                "Tag path prefix used by your vault generator for spell metadata. " +
-                "E.g. 'ttrpg-cli' reads tags like ttrpg-cli/spell/school/Evocation. " +
-                "Rebuild the index after changing this."
-            )
-            .addText((text) => {
-                text.setPlaceholder("ttrpg-cli")
-                    .setValue(this.plugin.settings.spellTagPrefix || "ttrpg-cli")
-                    .onChange(async (value) => {
-                        this.plugin.settings.spellTagPrefix = value.trim() || "ttrpg-cli";
-                        await this.plugin.saveSettings(false);
-                    });
-            });
-
-        new Setting(containerEl)
-            .setName("Manual rebuild")
-            .setDesc("Force a full reindex immediately.")
-            .addButton((button) => {
-                button.setButtonText("Rebuild index").onClick(() => {
-                    this.plugin.buildIndex(true);
-                });
-            });
     }
 }
 
