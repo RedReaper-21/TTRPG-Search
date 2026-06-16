@@ -15,6 +15,8 @@ It is designed to work with vaults using the output of the [TTRPG‑CLI tool](ht
 
 🧩 Inline search buttons – insert clickable buttons that open specific books, adventures, or chapters
 
+🧛 Bestiary - An encounter builder and bestiary with a clean card view and shows icons, cr and other relevant information for DND monsters
+
 Installation:
 
 Copy https://github.com/RedReaper-21/TTRPG-Search/
